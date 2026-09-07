@@ -3771,9 +3771,30 @@ function gateOpenWebsite(e) {
       if (resultBox) {
           // Generate Certificate এ সংরক্ষিত সার্টিফিকেট ডিজাইনেই পূর্বরূপ (Preview) - A4 Landscape দেখানো হবে
           const saved = JSON.parse(localStorage.getItem('certificateFormData') || '{}');
+          // অনুসন্ধান করা শিক্ষার্থীর ভর্তি রেকর্ড খোঁজা হয় — পিতা/মাতার নাম, জন্মতারিখ ও শিক্ষাবর্ষ সেখান থেকেই বসবে
+          const searchLabelToCode = {};
+          for (const [code, label] of Object.entries(classCodeToLabel)) searchLabelToCode[label] = code;
+          const searchClassCode = searchLabelToCode[className] || className;
+          const bnDigitsForSearch = '০১২৩৪৫৬৭৮৯';
+          const normSearchValue = v => {
+              let s = String(v || '').trim().toLowerCase().replace(/[০-৯]/g, d => String(bnDigitsForSearch.indexOf(d)));
+              if (/^\d+$/.test(s)) s = String(parseInt(s, 10));
+              return s;
+          };
+          const searchPool = filterBySession(JSON.parse(localStorage.getItem('studentAdmissionData')) || [])
+              .filter(s => !searchClassCode || s.class === searchClassCode);
+          const matchedStudent = searchPool.find(s =>
+              (rollNo && normSearchValue(s.roll) === normSearchValue(rollNo)) ||
+              (studentName && normSearchValue(s.name) === normSearchValue(studentName))
+          ) || {};
+          const certDob = matchedStudent.dob || '';
+          const certYear = matchedStudent.session || saved.year || '';
+          const certClassLabel = matchedStudent.class ? (classCodeToLabel[matchedStudent.class] || matchedStudent.class) : className;
           resultBox.innerHTML = `
-              <input type="hidden" id="className" value="${className}">
-              <input type="hidden" id="year" value="${saved.year || ''}">
+              <input type="hidden" id="className" value="${escapeHtmlAttr(certClassLabel)}">
+              <input type="hidden" id="year" value="${escapeHtmlAttr(bnNum(certYear))}">
+              <input type="hidden" id="dateOfBirth" value="${escapeHtmlAttr(certDob)}">
+              <input type="hidden" id="dateInWords" value="${escapeHtmlAttr(convertDateToBangla(certDob))}">
               <div style="background-color: white; padding: 25px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow-y: auto;">
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
                       <h3 style="color: #0c105c; margin: 0; font-size: 16px; font-weight: 600;">
@@ -3801,7 +3822,10 @@ function gateOpenWebsite(e) {
                   bgImg,
                   logoImg,
                   saved.certType || '',
-                  studentName, saved.fatherName || '', saved.motherName || '', rollNo,
+                  matchedStudent.name || studentName,
+                  matchedStudent.fatherName || saved.fatherName || '',
+                  matchedStudent.motherName || saved.motherName || '',
+                  matchedStudent.roll || rollNo,
                   saved.serialNumber || 'CERT-0001',
                   saved.schoolName || 'স্কুলের নাম',
                   saved.schoolAddress || '',
@@ -3825,9 +3849,14 @@ function gateOpenWebsite(e) {
       if (!box) return;
 
       const saved = JSON.parse(localStorage.getItem('certificateFormData') || '{}');
+      // শিক্ষাবর্ষ ও জন্মতারিখ নির্বাচিত শিক্ষার্থীর ভর্তি রেকর্ড থেকেই নেওয়া হয় (ফর্মের ডেটা নয়)
+      const certStudentDob = student.dob || '';
+      const certSessionYear = student.session || saved.year || '';
       box.innerHTML = `
-          <input type="hidden" id="className" value="${student.classLabel}">
-          <input type="hidden" id="year" value="${saved.year || ''}">
+          <input type="hidden" id="className" value="${escapeHtmlAttr(student.classLabel)}">
+          <input type="hidden" id="year" value="${escapeHtmlAttr(bnNum(certSessionYear))}">
+          <input type="hidden" id="dateOfBirth" value="${escapeHtmlAttr(certStudentDob)}">
+          <input type="hidden" id="dateInWords" value="${escapeHtmlAttr(convertDateToBangla(certStudentDob))}">
           <div style="background-color: white; padding: 25px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow-y: auto;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
                   <h3 style="color: #0c105c; margin: 0; font-size: 16px; font-weight: 600;">
@@ -3857,7 +3886,7 @@ function gateOpenWebsite(e) {
               bgImg,
               logoImg,
               saved.certType || '',
-              student.name || '', student.fatherName || '', '', student.roll || '',
+              student.name || '', student.fatherName || '', student.motherName || '', student.roll || '',
               saved.serialNumber || 'CERT-0001',
               saved.schoolName || 'স্কুলের নাম',
               saved.schoolAddress || '',
@@ -4341,9 +4370,10 @@ function gateOpenWebsite(e) {
       let certDate = '';
       if (certDateRaw) {
           const dparts = certDateRaw.split('-');
-          if (dparts.length === 3) certDate = dparts[2] + '/' + dparts[1] + '/' + dparts[0];
+          if (dparts.length === 3) certDate = bnNum(dparts[2] + '/' + dparts[1] + '/' + dparts[0]);
       }
-      const dateInWords = (document.getElementById('dateInWords') || {}).value || '';
+      // "কথায়" ঘর ফাঁকা থাকলে জন্মতারিখ থেকেই বাংলা কথায় তৈরি হবে
+      const dateInWords = (document.getElementById('dateInWords') || {}).value || convertDateToBangla(certDateRaw);
       const className = (document.getElementById('className') || {}).value || '';
       const yearRaw = (document.getElementById('year') || {}).value || '';
 
@@ -28456,13 +28486,13 @@ function getStudentIDCardHTML() {
                 <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 15px; align-items: flex-end;">
                     <div>
                         <label style="display: block; margin-bottom: 8px; color: #333; font-weight: 600; font-size: 13px;">শ্রেণি নির্বাচন করুন (Select Class) <span style="color: red;">*</span></label>
-                        <select id="idCardClassSelect" onchange="filterStudentsByClass()" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                        <select id="idCardClassSelect" onchange="filterIDCardStudents()" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
                             <option value="">সব শ্রেণি</option>
                         </select>
                     </div>
                     <div>
                         <label style="display: block; margin-bottom: 8px; color: #333; font-weight: 600; font-size: 13px;">অনুসন্ধান</label>
-                        <input type="text" id="idCardSearchInput" onkeyup="filterStudentsByClass()" placeholder="নাম বা প্রবেশ নম্বর দিয়ে খুঁজুন" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                        <input type="text" id="idCardSearchInput" onkeyup="filterIDCardStudents()" placeholder="নাম বা প্রবেশ নম্বর দিয়ে খুঁজুন" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
                     </div>
                     <button onclick="downloadAllIDCards()" style="padding: 10px 20px; background-color: #28a745; color: white; border: none; border-radius: 4px; font-weight: 600; cursor: pointer; font-size: 13px;">
                         <i class="fa-solid fa-download"></i> ডাউনলোড
@@ -28532,10 +28562,10 @@ async function initStudentIDCardViewer() {
         idCardsContainer.dataset.downloadBound = '1';
     }
 
-    filterStudentsByClass();
+    filterIDCardStudents();
 }
 
-async function filterStudentsByClass() {
+async function filterIDCardStudents() {
     const selectedClass = document.getElementById('idCardClassSelect').value;
     const searchText = document.getElementById('idCardSearchInput').value.toLowerCase();
     const savedStudents = filterBySession(JSON.parse(localStorage.getItem('studentAdmissionData') || '[]'));
@@ -29186,16 +29216,20 @@ function generateStaffIDCardHTML(staffMember, designData, index) {
             </div>
 
             <!-- Staff Info -->
-            <div style="${middleSectionBg} padding: 7px 10px 7px 10px; text-align: left;">
-                <div style="display: grid; grid-template-columns: 80px auto; gap: 6px; margin-bottom: 6px; align-items: center; font-size: 17px;">
+            <div style="${middleSectionBg} padding: 5px 10px 5px 10px; text-align: left;">
+                <div style="display: grid; grid-template-columns: 80px auto; gap: 6px; margin-bottom: 2px; align-items: center; font-size: 17px;">
                     <span style="font-weight: bold; color: #333;">Name</span>
                     <span style="color: ${dataColor}; font-weight: bold;">: ${escapeHtml(staffMember.name || 'N/A')}</span>
                 </div>
-                <div style="display: grid; grid-template-columns: 80px auto; gap: 6px; margin-bottom: 6px; align-items: center; font-size: 17px;">
+                <div style="display: grid; grid-template-columns: 80px auto; gap: 6px; margin-bottom: 2px; align-items: center; font-size: 17px;">
+                    <span style="font-weight: bold; color: #333;">Staff ID</span>
+                    <span style="color: ${dataColor}; font-weight: bold;">: ${escapeHtml(staffMember.staffId || 'N/A')}</span>
+                </div>
+                <div style="display: grid; grid-template-columns: 80px auto; gap: 6px; margin-bottom: 2px; align-items: center; font-size: 17px;">
                     <span style="font-weight: bold; color: #333;">Designation</span>
                     <span style="color: ${dataColor}; font-weight: bold;">: ${escapeHtml(staffMember.designation || 'N/A')}</span>
                 </div>
-                <div style="display: grid; grid-template-columns: 80px auto; gap: 6px; margin-bottom: 6px; align-items: center; font-size: 17px;">
+                <div style="display: grid; grid-template-columns: 80px auto; gap: 6px; margin-bottom: 2px; align-items: center; font-size: 17px;">
                     <span style="font-weight: bold; color: #333;">Phone No</span>
                     <span style="color: ${dataColor}; font-weight: bold;">: ${escapeHtml(staffMember.phone || 'N/A')}</span>
                 </div>
