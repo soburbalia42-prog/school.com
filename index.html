@@ -1556,6 +1556,7 @@ function gateOpenWebsite(e) {
                         <li><a href="#" onclick="loadOnlineAdmissionPage(event)" data-target="online-admission"><i class="fa-solid fa-laptop-file"></i> <span>অনলাইন ভর্তি (Online Admission)</span></a></li>
                         <li><a href="#" onclick="loadDisabledStudentsPage(event)" data-target="disabled-students"><i class="fa-solid fa-user-slash"></i> <span>নিষ্ক্রিয় শিক্ষার্থী (Disabled Students)</span></a></li>
                         <li><a href="#" onclick="loadStudentCategoriesPage(event)" data-target="student-categories"><i class="fa-solid fa-layer-group"></i> <span>শিক্ষার্থী বিভাগ (Student Categories)</span></a></li>
+                        <li><a href="#" onclick="loadAddClassPage(event)" data-target="add-class"><i class="fa-solid fa-book-open"></i> <span>ক্লাস সংযোজন (Add Class)</span></a></li>
                     </ul>
                 </li>
                 <li class="has-submenu" data-target="fees">
@@ -10788,6 +10789,30 @@ function gateOpenWebsite(e) {
   // Fees Group (Class) তালিকা
   const fmGroupsList = ['নার্সারি', '১ম শ্রেণী', '২য় শ্রেণী', '৩য় শ্রেণী', '৪র্থ শ্রেণী', '৫ম শ্রেণী', '৬ষ্ঠ শ্রেণী', '৭ম শ্রেণী', '৮ম শ্রেণী', '৯ম শ্রেণী', '১০ম শ্রেণী', '১১শ শ্রেণী', '১২শ শ্রেণী'];
 
+  // ==========================================================================
+  // IT CONTROL PANEL > শিক্ষার্থীর তথ্য (Student Information) > ক্লাস সংযোজন
+  // (Add Class) থেকে যোগ করা ক্লাসগুলো Fees Group তালিকায় স্বয়ংক্রিয়ভাবে যুক্ত করে।
+  // ডিফল্ট ক্লাসগুলো আগের মতোই থাকে, কিছুই বাদ যায় না।
+  // ==========================================================================
+  function fmGetGroupsList() {
+      var list = fmGroupsList.slice();
+      try {
+          var added = [];
+          if (typeof classListData !== 'undefined' && classListData) {
+              added = classListData;
+          } else {
+              added = JSON.parse(localStorage.getItem('classData')) || [];
+          }
+          added.forEach(function (cls) {
+              if (!cls || !cls.className) return;
+              var label = (cls.className + (cls.classSection ? ' - ' + cls.classSection : '')).trim();
+              if (!label) return;
+              if (list.indexOf(label) === -1) list.push(label);
+          });
+      } catch (e) { /* উপেক্ষা করুন */ }
+      return list;
+  }
+
   const fmSalaryTierMap = {
       'নার্সারি': 600, '১ম শ্রেণী': 600, '২য় শ্রেণী': 600, '৩য় শ্রেণী': 600, '৪র্থ শ্রেণী': 600,
       '৫ম শ্রেণী': 700, '৬ষ্ঠ শ্রেণী': 700, '৭ম শ্রেণী': 700, '৮ম শ্রেণী': 700,
@@ -10831,15 +10856,16 @@ function gateOpenWebsite(e) {
       }
       if (!Array.isArray(groups)) groups = [];
       // সব শ্রেণি (Fees Group) যেন পুরোপুরি তালিকায় থাকে তা নিশ্চিত করুন
-      fmGroupsList.forEach(g => {
+      fmGetGroupsList().forEach(g => {
           if (!groups.some(item => item && item.group === g)) {
               groups.push({group: g, fees: generateDefaultFeesForGroup(g)});
           }
       });
       // fmGroupsList-এর ক্রম অনুযায়ী সাজান (নার্সারি থেকে ১২শ শ্রেণী পর্যন্ত)
       const orderOf = (g) => {
-          const i = fmGroupsList.indexOf(g);
-          return i === -1 ? fmGroupsList.length : i;
+          const fullList = fmGetGroupsList();
+          const i = fullList.indexOf(g);
+          return i === -1 ? fullList.length : i;
       };
       groups.sort((a, b) => orderOf(a.group) - orderOf(b.group));
       return groups;
@@ -10857,6 +10883,8 @@ function gateOpenWebsite(e) {
   // Fees Master পেজ লোড করুন
   function loadFeesMasterPage(event) {
       if (event) event.preventDefault();
+      // Add Class থেকে নতুন ক্লাস যোগ হয়ে থাকলে সেগুলোও Fees Group তালিকায় নিয়ে আসুন
+      feesMasterGroups = loadFeesMasterGroups();
       const contentArea = document.getElementById('content-area');
       contentArea.innerHTML = getFeesMasterHTML();
       attachFeesMasterEvents();
@@ -10923,7 +10951,7 @@ function gateOpenWebsite(e) {
                   <label style="display: block; font-size: 12px; font-weight: 600; color: #333; margin-bottom: 6px;">Fees Group <span style="color: red;">*</span></label>
                   <select id="fmf-group" style="width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; box-sizing: border-box;">
                       <option value="">Select</option>
-                      ${fmGroupsList.map(g => `<option value="${g}">${g}</option>`).join('')}
+                      ${fmGetGroupsList().map(g => `<option value="${g}">${g}</option>`).join('')}
                   </select>
               </div>
               <div style="margin-bottom: 15px;">
@@ -10997,7 +11025,7 @@ function gateOpenWebsite(e) {
               <label style="display: block; font-size: 12px; font-weight: 600; color: #333; margin-bottom: 6px;">Fees Group <span style="color: red;">*</span></label>
               <select id="fmf-group" style="width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; box-sizing: border-box;">
                   <option value="">Select</option>
-                  ${fmGroupsList.map(g => `<option value="${g}" ${g === selectedGroup ? 'selected' : ''}>${g}</option>`).join('')}
+                  ${fmGetGroupsList().map(g => `<option value="${g}" ${g === selectedGroup ? 'selected' : ''}>${g}</option>`).join('')}
               </select>
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 15px;">
@@ -17375,6 +17403,46 @@ function todayDateStr() {
     return `${yyyy}-${mm}-${dd}`;
 }
 
+// ============================================================================
+// উপস্থিতি (Attendance) > শিক্ষার্থীর উপস্থিতি — "ক্লাস নির্বাচন করুন" ড্রপডাউন
+// -----------------------------------------------------------------------------
+// IT CONTROL PANEL > শিক্ষার্থীর তথ্য (Student Information) > ক্লাস সংযোজন
+// (Add Class) থেকে যোগ করা ক্লাসগুলো এখানে স্বয়ংক্রিয়ভাবে যুক্ত হয়ে যায়।
+// বিদ্যমান ডিফল্ট ক্লাসগুলো আগের মতোই থাকে — কিছুই বাদ যায় না।
+// ============================================================================
+function getAttendanceClassOptionsHTML() {
+    var html = '';
+    var usedLabels = {};
+
+    // ১) বিদ্যমান ডিফল্ট ক্লাস তালিকা (আগের মতোই)
+    try {
+        (typeof classData !== 'undefined' ? classData : []).forEach(function (c) {
+            usedLabels[String(c.className).trim()] = true;
+            html += '<option value="' + c.classId + '">' + c.className + '</option>';
+        });
+    } catch (e) { /* উপেক্ষা */ }
+
+    // ২) ক্লাস সংযোজন (Add Class) পেজ থেকে যোগ করা ক্লাসসমূহ
+    try {
+        var addedClasses = [];
+        if (typeof classListData !== 'undefined' && classListData) {
+            addedClasses = classListData;
+        } else {
+            addedClasses = JSON.parse(localStorage.getItem('classData')) || [];
+        }
+        addedClasses.forEach(function (cls) {
+            if (!cls || !cls.className) return;
+            var label = cls.className + (cls.classSection ? ' - ' + cls.classSection : '');
+            label = label.trim();
+            if (usedLabels[label]) return;
+            usedLabels[label] = true;
+            html += '<option value="addclass-' + cls.id + '">' + label + '</option>';
+        });
+    } catch (e) { /* উপেক্ষা */ }
+
+    return html;
+}
+
 function getStudentAttendanceHTML() {
     return `
     <div style="padding: 20px;">
@@ -17388,7 +17456,7 @@ function getStudentAttendanceHTML() {
                     <label style="display: block; font-size: 13px; font-weight: 600; color: #333; margin-bottom: 8px;">ক্লাস নির্বাচন করুন</label>
                     <select id="att-class-select" onchange="renderAttendanceTable()" style="padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; min-width: 220px;">
                         <option value="">-- ক্লাস নির্বাচন করুন --</option>
-                        ${classData.map(c => `<option value="${c.classId}">${c.className}</option>`).join('')}
+                        ${getAttendanceClassOptionsHTML()}
                     </select>
                 </div>
                 <div>
@@ -17469,7 +17537,7 @@ function getAttendanceClassStudents(classId) {
     admissionList = filterBySession(admissionList);
 
     const mapped = admissionList
-        .filter(s => (classCodeMap[s.class] || s.classId) === classId)
+        .filter(s => (classCodeMap[s.class] || s.classId || s.class) === classId)
         .map(s => ({ roll: s.roll || '', name: s.name || '' }));
 
     // পুরনো ডেমো তালিকায় (studentData) সরাসরি classId মিলে গেলে সেগুলোও (ডুপ্লিকেট বাদ দিয়ে) যোগ করুন
@@ -24591,24 +24659,72 @@ var DEFAULT_SCHOOL_WEBSITE = 'website.html';
 function getSchoolWebsite() {
     try { return localStorage.getItem('schoolWebsiteUrl') || DEFAULT_SCHOOL_WEBSITE; } catch (e) { return DEFAULT_SCHOOL_WEBSITE; }
 }
-// ওয়েবসাইট (Website) — সাইডবার ক্লিক করলে website.html সরাসরি প্যানেলের ভেতরেই এমবেড হয়
+// ওয়েবসাইট (Website) — সাইডবার ক্লিক করলে ওয়েবসাইট সরাসরি প্যানেলের ভেতরেই এমবেড হয়
+// এখানে উপরে একটি "ওয়েবসাইট লিংক আপলোড" বার যুক্ত করা হয়েছে — লিংক সেভ করলেই
+// নিচের প্রিভিউ এবং লগইন পেজের Website বাটন সেই লিংকেই যাবে।
 function openWebsiteDirectly(event) {
     if (event && event.preventDefault) event.preventDefault();
     const contentArea = document.getElementById('content-area');
     if (!contentArea) return;
-    // website.html কে একটি iframe এ ভেতরের কনটেন্ট এমবেড করুন (স্ক্রিপ্ট ও স্টাইলসহ সম্পূর্ণ ওয়েবসাইট)
+
+    const savedUrl = getSchoolWebsite();
+    const safeAttr = String(savedUrl).replace(/"/g, '&quot;');
+
+    // website.html (বা সেভ করা লিংক) কে একটি iframe এ এমবেড করুন (স্ক্রিপ্ট ও স্টাইলসহ সম্পূর্ণ ওয়েবসাইট)
     contentArea.innerHTML =
         '<div style="padding:16px 20px 0;">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">' +
                 '<h2 style="color:#0c105c; margin:0;"><i class="fa-solid fa-globe" style="margin-right:8px;"></i>ওয়েবসাইট (Website)</h2>' +
-                '<button onclick="window.open(\'website.html\', \'_blank\')" style="padding:8px 16px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:700;font-size:13px;"><i class="fa-solid fa-arrow-up-right-from-square" style="margin-right:6px;"></i>নতুন ট্যাবে খুলুন</button>' +
+                '<button onclick="openSchoolWebsiteNewTab()" style="padding:8px 16px;background:#2e7d32;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:700;font-size:13px;"><i class="fa-solid fa-arrow-up-right-from-square" style="margin-right:6px;"></i>নতুন ট্যাবে খুলুন</button>' +
+            '</div>' +
+        '</div>' +
+        '<div style="padding:16px 20px 0;">' +
+            '<div style="background:#fff;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;">' +
+                '<div style="background:linear-gradient(90deg,#0c105c 0%,#1a2f8f 100%);color:#fff;padding:12px 16px;font-weight:700;font-size:14px;"><i class="fa-solid fa-link" style="margin-right:6px;"></i>ওয়েবসাইট লিংক আপলোড (Website Link Upload)</div>' +
+                '<div style="padding:16px;">' +
+                    '<label style="display:block;font-size:12px;font-weight:600;color:#333;margin-bottom:6px;">ওয়েবসাইট URL (যেমন: https://www.example.com)</label>' +
+                    '<div style="display:flex;gap:10px;flex-wrap:wrap;">' +
+                        '<input type="text" id="schoolWebsiteInput" value="' + safeAttr + '" placeholder="https://..." style="flex:1;min-width:220px;padding:10px 12px;border:1px solid #ccc;border-radius:4px;font-size:13px;box-sizing:border-box;">' +
+                        '<button onclick="saveSchoolWebsiteInline()" style="padding:10px 22px;background:#0c105c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:700;font-size:13px;"><i class="fa-solid fa-upload" style="margin-right:6px;"></i>আপলোড / সেভ করুন</button>' +
+                        '<button onclick="resetSchoolWebsiteInline()" style="padding:10px 18px;background:#eceff5;color:#0c105c;border:1px solid #c9d2e6;border-radius:4px;cursor:pointer;font-weight:700;font-size:13px;"><i class="fa-solid fa-rotate-left" style="margin-right:6px;"></i>রিসেট</button>' +
+                    '</div>' +
+                    '<div style="font-size:12px;color:#666;margin-top:8px;">এই লিংক শুধু এই স্কুলের জন্য সেভ থাকে। সেভ করার পর নিচের প্রিভিউ এবং লগইন পেজের <strong>Website</strong> বাটন এই লিংকেই যাবে। রিসেট করলে আবার ডিফল্ট <strong>website.html</strong> দেখাবে।</div>' +
+                '</div>' +
             '</div>' +
         '</div>' +
         '<div style="padding:16px 20px 20px;">' +
             '<div style="background:#fff;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;">' +
-                '<iframe src="website.html" style="width:100%;height:82vh;border:none;display:block;background:#fff;"></iframe>' +
+                '<iframe src="' + safeAttr + '" style="width:100%;height:82vh;border:none;display:block;background:#fff;"></iframe>' +
             '</div>' +
+            '<div style="font-size:12px;color:#666;margin-top:8px;">💡 প্রিভিউ ফাঁকা দেখালে বুঝবেন ওয়েবসাইটটি অন্য পেজের ভেতরে embed হতে দেয় না — সেক্ষেত্রে উপরের সবুজ <strong>"নতুন ট্যাবে খুলুন"</strong> বাটনে ক্লিক করুন।</div>' +
         '</div>';
+}
+
+// নতুন ট্যাবে সেভ করা (বা ডিফল্ট) ওয়েবসাইট খুলুন
+function openSchoolWebsiteNewTab() {
+    window.open(getSchoolWebsite(), '_blank');
+}
+
+// ওয়েবসাইট মেনুর ভেতরের লিংক আপলোড বার থেকে সেভ করুন
+function saveSchoolWebsiteInline() {
+    const input = document.getElementById('schoolWebsiteInput');
+    if (!input) return;
+    let url = (input.value || '').trim();
+    if (!url) { alert('অনুগ্রহ করে ওয়েবসাইট URL লিখুন।'); return; }
+    if (!/^https?:\/\//i.test(url) && url !== DEFAULT_SCHOOL_WEBSITE && !/^[\w.-]+\.html?$/i.test(url)) {
+        url = 'https://' + url;
+    }
+    try { localStorage.setItem('schoolWebsiteUrl', url); }
+    catch (e) { alert('সেভ করা যায়নি।'); return; }
+    alert('✓ ওয়েবসাইট লিংক সেভ হয়েছে!');
+    openWebsiteDirectly({ preventDefault: function () {} });
+}
+
+// সেভ করা লিংক মুছে ডিফল্ট website.html এ ফিরে যান
+function resetSchoolWebsiteInline() {
+    if (!confirm('সেভ করা ওয়েবসাইট লিংক মুছে ডিফল্ট website.html এ ফিরে যাবেন?')) return;
+    try { localStorage.removeItem('schoolWebsiteUrl'); } catch (e) {}
+    openWebsiteDirectly({ preventDefault: function () {} });
 }
 function loadWebsitePage(event) {
     if (event && event.preventDefault) event.preventDefault();
@@ -25205,6 +25321,243 @@ function loadDisableReasonPage(event) {
     contentArea.innerHTML = document.getElementById('disable-reason-content').innerHTML;
     displayDisableReasons();
 }
+
+// ============ Add Class Functions ============
+var classListData = JSON.parse(localStorage.getItem('classData')) || [];
+
+function loadAddClassPage(event) {
+    if (event && event.preventDefault) event.preventDefault();
+    const contentArea = document.getElementById('content-area');
+    contentArea.innerHTML = document.getElementById('add-class-content').innerHTML;
+    displayAddClasses();
+}
+
+function saveAddClass() {
+    const className = document.getElementById('className').value.trim();
+    const classSection = document.getElementById('classSection').value.trim();
+
+    if (!className || !classSection) {
+        alert('অনুগ্রহ করে সমস্ত প্রয়োজনীয় ফিল্ড পূরণ করুন (*)');
+        return;
+    }
+
+    const newClass = {
+        id: Date.now(),
+        className: className,
+        classSection: classSection,
+        createdDate: new Date().toLocaleDateString('bn-BD')
+    };
+
+    classListData.push(newClass);
+    localStorage.setItem('classData', JSON.stringify(classListData));
+    if (typeof acdSyncAllClassSelects === 'function') acdSyncAllClassSelects(document);
+    
+    alert('✓ ক্লাস সফলভাবে যোগ করা হয়েছে!');
+    resetClassForm();
+    displayAddClasses();
+}
+
+function displayAddClasses() {
+    const tableBody = document.getElementById('classesTable');
+    if (!tableBody) return;
+
+    if (classListData.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="4" class="empty-state">কোন ক্লাস নেই। প্রথম ক্লাস যোগ করুন।</td></tr>';
+        return;
+    }
+
+    tableBody.innerHTML = classListData.map((cls, index) => {
+        return `
+        <tr>
+            <td>${index + 1}</td>
+            <td><strong>${cls.className}</strong></td>
+            <td>${cls.classSection}</td>
+            <td>
+                <button onclick="editClass(${cls.id})" style="padding: 4px 8px; background-color: #3498db; color: white; border: none; border-radius: 3px; cursor: pointer; margin-right: 5px;">সম্পাদনা</button>
+                <button onclick="deleteClass(${cls.id})" style="padding: 4px 8px; background-color: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer;">মুছুন</button>
+            </td>
+        </tr>
+        `;
+    }).join('');
+}
+
+function deleteClass(id) {
+    if (confirm('আপনি কি এই ক্লাসটি মুছতে চান?')) {
+        classListData = classListData.filter(cls => cls.id !== id);
+        localStorage.setItem('classData', JSON.stringify(classListData));
+        if (typeof acdSyncAllClassSelects === 'function') acdSyncAllClassSelects(document);
+        alert('✓ ক্লাস সফলভাবে মুছে দেওয়া হয়েছে!');
+        displayAddClasses();
+    }
+}
+
+function editClass(id) {
+    const cls = classListData.find(c => c.id === id);
+    if (cls) {
+        document.getElementById('className').value = cls.className;
+        document.getElementById('classSection').value = cls.classSection;
+        
+        // Delete the old one and let user save as new
+        classListData = classListData.filter(c => c.id !== id);
+        localStorage.setItem('classData', JSON.stringify(classListData));
+        if (typeof acdSyncAllClassSelects === 'function') acdSyncAllClassSelects(document);
+        
+        alert('এখন আপডেট করা তথ্য সংরক্ষণ করুন');
+        displayAddClasses();
+    }
+}
+
+function resetClassForm() {
+    document.getElementById('className').value = '';
+    document.getElementById('classSection').value = '';
+}
+
+// ============================================================================
+// ক্লাস সংযোজন (Add Class) অটো-সিঙ্ক ইঞ্জিন
+// -----------------------------------------------------------------------------
+// IT CONTROL PANEL > শিক্ষার্থীর তথ্য (Student Information) > ক্লাস সংযোজন
+// (Add Class) থেকে যে ক্লাস যোগ করা হয়, তা সম্পূর্ণ HTML এর মধ্যে থাকা সকল
+// "শ্রেণি (Class) *" ড্রপডাউন/সিলেক্ট বক্সে স্বয়ংক্রিয়ভাবে যুক্ত হয়ে যায় —
+// এই স্ক্রিপ্টটি সেই কাজটি করে। বিদ্যমান কোনো ফিচার/ডিজাইন পরিবর্তন করা হয়নি।
+// ============================================================================
+
+// অ্যাপে ইতিমধ্যে ব্যবহৃত ডিফল্ট শ্রেণি কোডসমূহ — এগুলোর যেকোনো একটি কোনো
+// <select> এ থাকলে সেটিকে "শ্রেণি (Class)" ড্রপডাউন হিসেবে শনাক্ত করা হয়।
+var ACD_DEFAULT_CLASS_CODES = [
+    'baby', 'nursery', 'nursery-1', 'nursery-2', 'nursery-3', 'nursery-upper',
+    'class1', 'class2', 'class3', 'class4', 'class5', 'class6', 'class7',
+    'class8', 'class9', 'class10', 'class11', 'class12',
+    'primary-1', 'primary-2', 'primary-3', 'primary-4', 'primary-5',
+    'secondary-6', 'secondary-7', 'secondary-8', 'secondary-9', 'secondary-10',
+    'higher-11', 'higher-12'
+];
+
+// এই select এলিমেন্টটি "শ্রেণি (Class)" ড্রপডাউন কিনা তা যাচাই করে
+function acdIsClassSelect(sel) {
+    if (!sel || sel.tagName !== 'SELECT') return false;
+    var opts = sel.querySelectorAll('option');
+    for (var i = 0; i < opts.length; i++) {
+        if (ACD_DEFAULT_CLASS_CODES.indexOf(opts[i].value) !== -1) return true;
+    }
+    return false;
+}
+
+// Add Class থেকে আসা একটি ক্লাসের জন্য একটি ইউনিক option value তৈরি করে
+function acdCustomOptionValue(cls) {
+    return 'addclass-' + cls.id;
+}
+
+// একটি নির্দিষ্ট select এর মধ্যে classListData (Add Class) এর তথ্য সিঙ্ক করে:
+// নতুন ক্লাস যোগ থাকলে option হিসেবে যুক্ত করে, মুছে ফেলা ক্লাস থাকলে সরিয়ে দেয়
+function acdSyncSelect(sel) {
+    if (!acdIsClassSelect(sel)) return;
+
+    var currentValue = sel.value;
+
+    // আগে এই স্ক্রিপ্ট দ্বারা যুক্ত করা কিন্তু এখন মুছে ফেলা ক্লাসের option সরিয়ে দিন
+    var validCustomValues = {};
+    (classListData || []).forEach(function (cls) {
+        validCustomValues[acdCustomOptionValue(cls)] = true;
+    });
+    var existingOpts = sel.querySelectorAll('option[data-added-class="1"]');
+    for (var i = 0; i < existingOpts.length; i++) {
+        if (!validCustomValues[existingOpts[i].value]) {
+            existingOpts[i].parentNode.removeChild(existingOpts[i]);
+        }
+    }
+
+    // বর্তমানে যা যা option হিসেবে আছে (মান ও লেবেল) তার তালিকা তৈরি করুন
+    var opts = sel.querySelectorAll('option');
+    var existingValues = {};
+    var existingLabels = {};
+    for (var i = 0; i < opts.length; i++) {
+        existingValues[opts[i].value] = true;
+        existingLabels[(opts[i].textContent || '').trim()] = true;
+    }
+
+    // Add Class পেজ থেকে যোগ করা প্রতিটি ক্লাস, না থাকলে option হিসেবে যুক্ত করুন
+    (classListData || []).forEach(function (cls) {
+        var val = acdCustomOptionValue(cls);
+        var label = cls.className + (cls.classSection ? ' - ' + cls.classSection : '');
+        if (existingValues[val] || existingLabels[label.trim()]) return;
+        var optEl = document.createElement('option');
+        optEl.value = val;
+        optEl.textContent = label;
+        optEl.setAttribute('data-added-class', '1');
+        sel.appendChild(optEl);
+        existingValues[val] = true;
+        existingLabels[label.trim()] = true;
+    });
+
+    // আগে যা নির্বাচিত ছিল, সম্ভব হলে তা-ই রাখুন
+    if (currentValue) {
+        var stillThere = false;
+        var checkOpts = sel.querySelectorAll('option');
+        for (var i = 0; i < checkOpts.length; i++) {
+            if (checkOpts[i].value === currentValue) { stillThere = true; break; }
+        }
+        if (stillThere) sel.value = currentValue;
+    }
+}
+
+// পুরো ডকুমেন্ট (বা নির্দিষ্ট অংশ) এর মধ্যে থাকা সকল "শ্রেণি (Class)"
+// ড্রপডাউনকে Add Class ডেটার সাথে সিঙ্ক করে
+function acdSyncAllClassSelects(root) {
+    try {
+        var scope = root || document;
+        var selects = scope.querySelectorAll('select');
+        for (var i = 0; i < selects.length; i++) {
+            acdSyncSelect(selects[i]);
+        }
+    } catch (e) {
+        // নীরবে উপেক্ষা করুন যাতে অন্য কোনো ফিচার প্রভাবিত না হয়
+    }
+}
+
+// পেজ প্রথমবার লোড হওয়ার সময় একবার সিঙ্ক করে নিন
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () {
+        acdSyncAllClassSelects(document);
+    });
+} else {
+    acdSyncAllClassSelects(document);
+}
+
+// মেনু/পেজ পরিবর্তনের সময় নতুন কোনো "শ্রেণি (Class)" ড্রপডাউন তৈরি হলেই
+// (কোনো নির্দিষ্ট ফাংশন এডিট না করে) স্বয়ংক্রিয়ভাবে সিঙ্ক করে দেয়
+(function () {
+    if (typeof MutationObserver === 'undefined') return;
+    var acdSyncTimer = null;
+    function acdScheduleSync() {
+        if (acdSyncTimer) return;
+        acdSyncTimer = setTimeout(function () {
+            acdSyncTimer = null;
+            acdSyncAllClassSelects(document);
+        }, 150);
+    }
+    function acdNodeHasSelect(node) {
+        if (node.nodeType !== 1) return false;
+        if (node.tagName === 'SELECT') return true;
+        return !!(node.querySelector && node.querySelector('select'));
+    }
+    var acdObserver = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+            var added = mutations[i].addedNodes;
+            if (!added || !added.length) continue;
+            for (var j = 0; j < added.length; j++) {
+                if (acdNodeHasSelect(added[j])) { acdScheduleSync(); return; }
+            }
+        }
+    });
+    function acdStartObserving() {
+        if (document.body) {
+            acdObserver.observe(document.body, { childList: true, subtree: true });
+        } else {
+            setTimeout(acdStartObserving, 50);
+        }
+    }
+    acdStartObserving();
+})();
 
 // Online Admission Functions
 function displayOnlineAdmissions() {
@@ -27582,6 +27935,51 @@ function deleteDisableReason(index) {
                 </thead>
                 <tbody id="complainTable">
                     <tr><td colspan="7" class="empty-state">কোন অভিযোগ নেই।</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Add Class Content -->
+<div id="add-class-content" style="display: none;">
+    <div class="library-container">
+        <div class="library-header">
+            <h2><i class="fa-solid fa-book-open"></i> ক্লাস সংযোজন (Add Class)</h2>
+        </div>
+        <div class="form-section">
+            <form id="addClassForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>ক্লাস নাম/নম্বর <span class="required">*</span></label>
+                        <input type="text" id="className" placeholder="যেমন: Class 1, Class 5B" required>
+                    </div>
+                    <div class="form-group">
+                        <label>সেকশন <span class="required">*</span></label>
+                        <input type="text" id="classSection" placeholder="যেমন: A, B, C" required>
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button type="button" onclick="saveAddClass()" class="btn-save">ক্লাস যোগ করুন</button>
+                    <button type="button" onclick="resetClassForm()" class="btn-reset" style="background-color: #95a5a6; color: white; margin-left: 10px;">রিসেট</button>
+                </div>
+            </form>
+        </div>
+        <div class="table-section">
+            <div class="table-header">
+                <h3>সমস্ত ক্লাসের তালিকা</h3>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>ক্লাস নাম</th>
+                        <th>সেকশন</th>
+                        <th>পদক্ষেপ</th>
+                    </tr>
+                </thead>
+                <tbody id="classesTable">
+                    <tr><td colspan="4" class="empty-state">কোন ক্লাস নেই। প্রথম ক্লাস যোগ করুন।</td></tr>
                 </tbody>
             </table>
         </div>
