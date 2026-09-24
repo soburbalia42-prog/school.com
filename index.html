@@ -22255,6 +22255,79 @@ function saveBnetSmsConfig(apiKey, senderId) {
     return config;
 }
 
+// টাইমআউটসহ fetch — স্লো/ডেড সার্ভারে আটকে না থেকে নির্দিষ্ট সময় পরে ফলাফল ফেরত দেয়
+function fetchWithSignal(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+    return fetch(url, Object.assign({}, options, { signal: controller.signal }))
+        .then(function(res) { return { resolved: true, res: res }; })
+        .catch(function(err) { return { resolved: false, timeout: err && err.name === 'AbortError', reason: (err && err.message) || 'নেটওয়ার্ক ত্রুটি' }; })
+        .then(function(out) { clearTimeout(timer); return out; });
+}
+
+// BNET-এ সরাসরি রিকোয়েস্ট (no-cors মোড): BNET সার্ভার কোনো CORS হেডার পাঠায় না বলে
+// সাধারণ fetch-এ ব্রাউজার রেসপন্স পড়া ব্লক করে ("Failed to fetch")। কিন্তু no-cors মোডে
+// রিকোয়েস্টটা আসলেই সার্ভারে পৌঁছে যায় এবং SMS প্রসেস হয় — শুধু রেসপন্সটা পড়া যায় না।
+// তাই fetch সফলভাবে resolve হওয়া মানেই SMS BNET-এ পৌঁছেছে; শুধু নেটওয়ার্ক-লেভেলের
+// ত্রুটিতে (DNS/কানেকশন ব্যর্থ) এটি reject করে।
+async function fetchBnetDirect(url, timeoutMs) {
+    const out = await fetchWithSignal(url, { mode: 'no-cors', cache: 'no-store' }, timeoutMs);
+    return { delivered: out.resolved, timeout: out.timeout || false, reason: out.reason || '' };
+}
+
+// পাবলিক CORS প্রক্সির মাধ্যমে কল (প্রক্সি সার্ভার-সাইড থেকে BNET-কে কল করে পড়া যায় এমন ফলাফল দেয়)
+async function fetchViaProxy(url, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+    try {
+        const res = await fetch(url, { method: 'GET', signal: controller.signal });
+        const body = await res.text();
+        return { ok: res.ok, status: res.status, body: body };
+    } catch (err) {
+        return { ok: false, status: 0, reason: (err && err.message) || 'নেটওয়ার্ক ত্রুটি' };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// BNET-এর JSON রেসপন্স বিশ্লেষণ: error_code 1000 = সফল, বাকিগুলো = আসল কারণসহ ব্যর্থ
+function parseBnetResponse(body) {
+    try {
+        const j = JSON.parse(body);
+        if (j && j.error_code !== undefined) {
+            if (String(j.error_code) === '1000') {
+                return { ok: true, info: j.message_id ? ('message_id: ' + j.message_id) : '', ipAuth: false };
+            }
+            const ipAuth = String(j.error_code) === '1001' || /IP Auth/i.test(j.error_message || '');
+            return { ok: false, info: bnetErrorHint(j), ipAuth: ipAuth };
+        }
+    } catch (e) { /* JSON নয় */ }
+    return { ok: null, info: '', ipAuth: false };
+}
+
+function bnetErrorHint(j) {
+    const code = String(j.error_code);
+    const msg = j.error_message || '';
+    if (code === '1001' || /IP Auth/i.test(msg)) {
+        return 'IP Auth Failed (1001) — BNET Portal (portal.bnet.com.bd)-এ আপনার IP হোয়াইটলিস্ট করুন অথবা IP authentication বন্ধ করুন, নইলে কোনো SMS যাবে না';
+    }
+    return msg || ('error_code ' + code);
+}
+
+// ব্যাচ শুরুতে একবারই যাচাই: কোনো CORS প্রক্সি জীবন্ত আছে কি না (জীবন্ত থাকলে BNET-এর আসল রেসপন্স পড়া যায়)
+async function probeProxyChannel() {
+    const target = encodeURIComponent('https://api.bnet.com.bd/');
+    const probes = [
+        'https://api.allorigins.win/raw?url=' + target,
+        'https://api.codetabs.com/v1/proxy?quest=' + target
+    ];
+    for (const probeUrl of probes) {
+        const r = await fetchViaProxy(probeUrl, 10000);
+        if (r.status === 200) return true;
+    }
+    return false;
+}
+
 async function sendSmsThroughBnet(phoneNumbers, message) {
     const config = getBnetSmsConfig();
     const apiKey = config.apiKey;
@@ -22272,6 +22345,9 @@ async function sendSmsThroughBnet(phoneNumbers, message) {
     let failedCount = 0;
     const failedPhones = [];
     const details = [];
+    
+    // ব্যাচ শুরুতে একবারই যাচাই: প্রক্সি জীবন্ত থাকলে তার মাধ্যমে পাঠানো হয় (BNET-এর আসল রেসপন্স পড়া যায়)
+    const proxyChannelOk = await probeProxyChannel();
     
     for (const phone of phoneNumbers) {
         try {
@@ -22291,24 +22367,71 @@ async function sendSmsThroughBnet(phoneNumbers, message) {
             
             const encodedMsg = encodeURIComponent(message);
             const bnetUrl = `https://api.bnet.com.bd/smsapi2?api_key=${apiKey}&type=text&contacts=${formattedPhone}&senderid=${senderId}&msg=${encodedMsg}`;
-            // BNET-এর API ব্রাউজার থেকে সরাসরি কল করলে CORS ব্লক করে দেয় (কারণ তাদের
-            // সার্ভার কোনো Access-Control-Allow-Origin হেডার পাঠায় না)। তাই একটা পাবলিক
-            // CORS প্রক্সি (allorigins.win) দিয়ে কল করা হচ্ছে — এটা সার্ভার সাইড থেকে
-            // BNET-কে কল করে ফলাফল ফেরত দেয়, ফলে আলাদা কোনো ব্যাকএন্ড ফাইলের দরকার হয় না।
-            // নোট: এই তৃতীয় পক্ষের সার্ভিসটা মাঝে মাঝে ডাউন/স্লো থাকতে পারে।
-            const apiUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(bnetUrl)}`;
+            // প্রক্সি জীবন্ত থাকলে তার মাধ্যমে পাঠানো হয় — তাহলে BNET-এর আসল রেসপন্স (error_code)
+            // পড়া যায়, ফলে ভুল "সফল" দেখায় না। প্রক্সিগুলোতে নেটওয়ার্কই না পৌঁছালে তবেই
+            // সরাসরি no-cors ফলব্যাক (অন্ধ, কিন্তু প্রক্সি-ছাড়াও SMS যেতে পারে)।
+            const encodedBnetUrl = encodeURIComponent(bnetUrl);
+            const corsProxies = [
+                'https://api.allorigins.win/raw?url=' + encodedBnetUrl,
+                'https://corsproxy.io/?url=' + encodedBnetUrl,
+                'https://api.codetabs.com/v1/proxy?quest=' + encodedBnetUrl
+            ];
             
-            const response = await fetch(apiUrl, {
-                method: 'GET'
-            });
+            let sent = false;
+            let sentVia = '';
+            let lastFailReason = '';
+            let uncertain = false;
+            let bnetSaidError = false;
+            let ipAuthError = false;
             
-            if (response.ok) {
+            if (proxyChannelOk) {
+                for (const apiUrl of corsProxies) {
+                    const proxyResult = await fetchViaProxy(apiUrl, 20000);
+                    if (proxyResult.status) {
+                        const parsed = parseBnetResponse(proxyResult.body || '');
+                        if (parsed.ok === true) {
+                            sent = true;
+                            sentVia = 'প্রক্সি';
+                        } else if (parsed.ok === false) {
+                            lastFailReason = parsed.info;
+                            bnetSaidError = true;
+                            ipAuthError = parsed.ipAuth;
+                        } else {
+                            lastFailReason = 'HTTP ' + proxyResult.status;
+                        }
+                        break;
+                    }
+                    lastFailReason = proxyResult.reason || lastFailReason;
+                }
+            }
+            
+            // IP Auth ব্যর্থ হলে কিছুই পাঠানো হয়নি — তাই তখন সরাসরি চ্যানেলে আবার চেষ্টা করা নিরাপদ
+            // (হয়তো আপনার নিজের IP হোয়াইটলিস্ট করা আছে)। অন্য পরিষ্কার ত্রুটিতে (ব্যালেন্স ইত্যাদি)
+            // আবার পাঠানোর দরকার নেই।
+            if (!sent && !uncertain && (!bnetSaidError || ipAuthError)) {
+                let attempt = await fetchBnetDirect(bnetUrl, 20000);
+                if (!attempt.delivered && !attempt.timeout) {
+                    attempt = await fetchBnetDirect(bnetUrl, 20000);
+                }
+                if (attempt.delivered) {
+                    sent = true;
+                    sentVia = 'সরাসরি BNET — রেসপন্স যাচাই হয়নি';
+                } else if (attempt.timeout) {
+                    // টাইমআউট মানে রিকোয়েস্ট সার্ভারে পৌঁছে থাকতে পারে — আবার পাঠালে ডুপ্লিকেট SMS ঝুঁকি
+                    uncertain = true;
+                    lastFailReason = 'সময় শেষ - সার্ভার সাড়া দেয়নি';
+                } else if (!bnetSaidError) {
+                    lastFailReason = attempt.reason;
+                }
+            }
+            
+            if (sent) {
                 successCount++;
-                details.push({ phone: formattedPhone, status: '✓ সফল', time: new Date().toLocaleTimeString('bn-BD') });
+                details.push({ phone: formattedPhone, status: '✓ সফল (' + sentVia + ')', time: new Date().toLocaleTimeString('bn-BD') });
             } else {
                 failedCount++;
                 failedPhones.push(phone);
-                details.push({ phone: formattedPhone, status: '❌ ব্যর্থ - HTTP ' + response.status, time: new Date().toLocaleTimeString('bn-BD') });
+                details.push({ phone: formattedPhone, status: (uncertain ? '⏳ ' : '❌ ব্যর্থ - ') + lastFailReason, time: new Date().toLocaleTimeString('bn-BD') });
             }
         } catch (error) {
             failedCount++;
@@ -22430,6 +22553,10 @@ async function loadSendSmsPage(event) {
                     </div>
                     <button onclick="saveBnetSmsConfig(document.getElementById('bnetApiKey').value, document.getElementById('bnetSenderId').value)" style="padding: 9px 18px; background: #0c105c; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">সেভ করুন</button>
                     <p style="font-size: 11px; color: #666; margin: 10px 0 0 0;">API URL: <code>https://api.bnet.com.bd/smsapi2?api_key=#API_KEY#&type=text&contacts=#contact#&senderid=#SENDERID#&msg=#smstext#</code></p>
+                    <p style="font-size: 12px; color: #8a4b08; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 8px 10px; margin: 10px 0 0 0; line-height: 1.7;">
+                        ⚠ <strong>SMS যাচ্ছে না?</strong> BNET অ্যাকাউন্টে IP whitelist চালু থাকলে শুধু হোয়াইটলিস্ট করা IP থেকেই SMS যায় — অন্য সব রিকোয়েস্ট নীরবে বাতিল হয় (error 1001 IP Auth Failed)। BNET Portal-এ IP whitelist-এ আপনার IP যুক্ত করুন অথবা IP authentication বন্ধ করুন।
+                        <br>আপনার বর্তমান পাবলিক IP: <strong id="bnetMyIp" style="color: #0c105c;">খোঁজা হচ্ছে...</strong>
+                    </p>
                 </div>
 
                 <div style="margin-bottom: 15px;">
@@ -22498,6 +22625,20 @@ async function loadSendSmsPage(event) {
             </div>
         </div>
     `;
+    updateBnetMyIp();
+}
+
+// ব্যবহারকারীর বর্তমান পাবলিক IP দেখায় — BNET Portal-এ whitelist করার সুবিধার জন্য
+async function updateBnetMyIp() {
+    const el = document.getElementById('bnetMyIp');
+    if (!el) return;
+    try {
+        const res = await fetch('https://api.ipify.org?format=json');
+        const j = await res.json();
+        el.textContent = j.ip;
+    } catch (e) {
+        el.textContent = 'যাচাই করা যায়নি';
+    }
 }
 
 function updateSmsRecipientOptions() {
