@@ -22120,16 +22120,29 @@ async function refreshSmsBalance(spanId, btn) {
 function getSmsStudents() {
     try {
         const list = JSON.parse(localStorage.getItem('studentAdmissionData') || '[]') || [];
-        if (typeof filterBySession === 'function') return filterBySession(list);
+        if (typeof filterBySession === 'function') {
+            const filtered = filterBySession(list);
+            // Ensure filterBySession returns an array
+            return Array.isArray(filtered) ? filtered : [];
+        }
         return Array.isArray(list) ? list : [];
-    } catch (e) { return []; }
+    } catch (e) { 
+        console.error('Error in getSmsStudents:', e);
+        return []; 
+    }
 }
 function smsStudentMobile(s) {
     return s.mobile || s.phone || s.guardianPhone || s.fatherPhone || s.motherPhone || s.fatherMobile || s.motherMobile || '';
 }
 function getPhoneNumbers(recipientType, studentId = null, className = null) {
     const phones = [];
-    const allStudents = getSmsStudents();
+    let allStudents = getSmsStudents();
+    
+    // যদি students পাওয়া না যায়, তাহলে সরাসরি return করুন
+    if (!allStudents || !Array.isArray(allStudents) || allStudents.length === 0) {
+        console.warn('⚠️ কোনো শিক্ষার্থী ডেটা পাওয়া যায়নি');
+        return [];
+    }
     
     if (recipientType === 'single' && studentId) {
         const student = allStudents.find(s => String(s.id) === String(studentId) || String(s.admissionNo) === String(studentId));
@@ -22216,10 +22229,98 @@ function getPhoneNumbers(recipientType, studentId = null, className = null) {
     }
     
     // শুধুমাত্র বৈধ ফোন নম্বর রাখুন (১১ ডিজিট এবং ০১ দিয়ে শুরু হওয়া)
-    return phones.filter(p => {
-        const num = p.number.toString().replace(/\D/g, '');
+    const validPhones = phones.filter(p => {
+        const num = String(p.number || '').replace(/\D/g, '');
         return num.length === 11 && num.startsWith('01');
     });
+    
+    console.log(`✓ মোট ${validPhones.length} টি বৈধ ফোন পাওয়া গেছে`);
+    // Ensure we always return an array
+    return Array.isArray(validPhones) ? validPhones : [];
+}
+
+// ========== BNET SMS Configuration & Functions ==========
+function getBnetSmsConfig() {
+    const stored = localStorage.getItem('bnet_sms_config');
+    return stored ? JSON.parse(stored) : {
+        apiKey: '91660f6c3b4d439289c5f80c81af4e96',
+        senderId: '8809648904158'
+    };
+}
+
+function saveBnetSmsConfig(apiKey, senderId) {
+    const config = { apiKey, senderId };
+    localStorage.setItem('bnet_sms_config', JSON.stringify(config));
+    alert('✓ BNET SMS কনফিগারেশন সেভ হয়েছে');
+    return config;
+}
+
+async function sendSmsThroughBnet(phoneNumbers, message) {
+    const config = getBnetSmsConfig();
+    const apiKey = config.apiKey;
+    const senderId = config.senderId;
+    
+    if (!apiKey || !senderId) {
+        throw new Error('BNET API Key এবং Sender ID কনফিগার করুন');
+    }
+    
+    if (!Array.isArray(phoneNumbers) || phoneNumbers.length === 0) {
+        throw new Error('কোনো ফোন নম্বর পাওয়া যায়নি');
+    }
+    
+    let successCount = 0;
+    let failedCount = 0;
+    const failedPhones = [];
+    const details = [];
+    
+    for (const phone of phoneNumbers) {
+        try {
+            let formattedPhone = String(phone).trim().replace(/\D/g, '');
+            
+            // নিশ্চিত করুন যে 11 ডিজিট আছে
+            if (formattedPhone.length === 11) {
+                formattedPhone = '88' + formattedPhone;
+            } else if (formattedPhone.length === 13 && formattedPhone.startsWith('88')) {
+                // ইতিমধ্যে সঠিক ফরম্যাট
+            } else {
+                failedCount++;
+                failedPhones.push(phone);
+                details.push({ phone: phone, status: '❌ ব্যর্থ - ভুল নম্বর ফরম্যাট', time: new Date().toLocaleTimeString('bn-BD') });
+                continue;
+            }
+            
+            const encodedMsg = encodeURIComponent(message);
+            const apiUrl = `https://api.bnet.com.bd/smsapi2?api_key=${apiKey}&type=text&contacts=${formattedPhone}&senderid=${senderId}&msg=${encodedMsg}`;
+            
+            const response = await fetch(apiUrl, {
+                method: 'GET'
+            });
+            
+            if (response.ok) {
+                successCount++;
+                details.push({ phone: formattedPhone, status: '✓ সফল', time: new Date().toLocaleTimeString('bn-BD') });
+            } else {
+                failedCount++;
+                failedPhones.push(phone);
+                details.push({ phone: formattedPhone, status: '❌ ব্যর্থ - HTTP ' + response.status, time: new Date().toLocaleTimeString('bn-BD') });
+            }
+        } catch (error) {
+            failedCount++;
+            failedPhones.push(phone);
+            details.push({ phone: phone, status: '❌ ত্রুটি - ' + error.message, time: new Date().toLocaleTimeString('bn-BD') });
+        }
+        
+        // রেট লিমিটিং এর জন্য বিলম্ব
+        await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    
+    return {
+        total: phoneNumbers.length,
+        success: successCount,
+        failed: failedCount,
+        failedPhones: failedPhones,
+        details: details
+    };
 }
 
 // ========== SuccessLife SMS Panel (smspanel.successlifeit.com) দিয়ে SMS পাঠানো ==========
@@ -22304,33 +22405,25 @@ async function loadSendSmsPage(event) {
             <h2 style="color: #0c105c; margin-bottom: 20px;">এসএমএস পাঠান (Send SMS)</h2>
 
             <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px;">
-                <h3 style="color: #0c105c; margin-top: 0;">এসএমএস পাঠান</h3>
+                <h3 style="color: #0c105c; margin-top: 0;">এসএমএস পাঠান (BNET মাধ্যমে)</h3>
 
                 <div style="background: #f0f8ff; border: 1px solid #0c105c; border-radius: 6px; padding: 15px; margin-bottom: 20px;">
-                    <h4 style="color: #0c105c; margin: 0 0 8px 0;">🔑 SMS অ্যাকাউন্ট সেটিংস (প্রতি স্কুলের নিজস্ব)</h4>
+                    <h4 style="color: #0c105c; margin: 0 0 8px 0;">🔑 BNET SMS API সেটিংস</h4>
                     <p style="font-size: 12px; color: #333; margin: 0 0 12px 0; line-height: 1.7;">
-                        প্রতিটি স্কুল <a href="${'https://smspanel.successlifeit.com/register'}" target="_blank" style="color: #0c105c; font-weight: bold;">এখানে ক্লিক করে ফ্রি অ্যাকাউন্ট</a> খুলে
-                        নিজের <strong>API Key</strong> ও <strong>Sender ID</strong> দিয়ে SMS পাঠাবে।
-                        অ্যাকাউন্ট থাকলে <a href="${'https://smspanel.successlifeit.com/login'}" target="_blank" style="color: #0c105c; font-weight: bold;">লগইন</a> করে API Key নিন।
-                        এই সেটিংস শুধু এই স্কুলের জন্য সেভ থাকে।
+                        BNET Portal (<a href="https://portal.bnet.com.bd/" target="_blank" style="color: #0c105c; font-weight: bold;">https://portal.bnet.com.bd/</a>) থেকে <strong>API Key</strong> এবং <strong>Sender ID</strong> পান।
                     </p>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
                         <div>
                             <label style="display: block; margin-bottom: 6px; font-weight: bold; font-size: 13px;">API Key <span style="color: #d90429;">*</span></label>
-                            <input type="text" id="smsApiKey" value="${(_smsCfg.apiKey || '').replace(/"/g, '&quot;')}" placeholder="প্যানেলের API Key পেস্ট করুন" style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                            <input type="text" id="bnetApiKey" value="${getBnetSmsConfig().apiKey}" placeholder="BNET API Key পেস্ট করুন" style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
                         </div>
                         <div>
-                            <label style="display: block; margin-bottom: 6px; font-weight: bold; font-size: 13px;">Sender ID / From <span style="color: #d90429;">*</span></label>
-                            <input type="text" id="smsSenderId" value="${(_smsCfg.senderId || '').replace(/"/g, '&quot;')}" placeholder="যেমন: SCHOOL" style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                            <label style="display: block; margin-bottom: 6px; font-weight: bold; font-size: 13px;">Sender ID <span style="color: #d90429;">*</span></label>
+                            <input type="text" id="bnetSenderId" value="${getBnetSmsConfig().senderId}" placeholder="যেমন: 8809648904158" style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
                         </div>
                     </div>
-                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <button onclick="saveSmsPanelConfigFromForm()" style="padding: 9px 18px; background: #0c105c; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">সেভ করুন</button>
-                        <button onclick="refreshSmsBalance('smsBalanceText', this)" style="padding: 9px 18px; background: #2e7d32; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">💰 ব্যালেন্স দেখুন</button>
-                        <span id="smsCfgStatus" style="font-size: 12px; font-weight: bold; color: ${_smsCfgOk ? '#2e7d32' : '#d90429'};">${_smsCfgOk ? '✓ কনফিগার করা আছে' : '⚠ API Key ও Sender ID সেভ করুন'}</span>
-                    </div>
-                    <div style="margin-top: 8px; font-size: 13px; font-weight: bold;"><span id="smsBalanceText" style="color: #666;">ব্যালেন্স দেখতে "ব্যালেন্স দেখুন" চাপুন (SMS পাঠালে এই সার্ভার অ্যাকাউন্ট থেকেই ক্রেডিট কাটবে)</span></div>
-                    <p style="font-size: 11px; color: #666; margin: 10px 0 0 0;">ধাপ: ১) রেজিস্টার → ২) লগইন → ৩) প্যানেল থেকে API Key + অনুমোদিত Sender ID নিন → ৪) এখানে পেস্ট করে সেভ → ৫) ব্যালেন্স রিচার্জ করে SMS পাঠান।</p>
+                    <button onclick="saveBnetSmsConfig(document.getElementById('bnetApiKey').value, document.getElementById('bnetSenderId').value)" style="padding: 9px 18px; background: #0c105c; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">সেভ করুন</button>
+                    <p style="font-size: 11px; color: #666; margin: 10px 0 0 0;">API URL: <code>https://api.bnet.com.bd/smsapi2?api_key=#API_KEY#&type=text&contacts=#contact#&senderid=#SENDERID#&msg=#smstext#</code></p>
                 </div>
 
                 <div style="margin-bottom: 15px;">
@@ -22389,7 +22482,7 @@ async function loadSendSmsPage(event) {
 
                 <div style="display: flex; gap: 10px; justify-content: flex-end;">
                     <button onclick="resetSmsForm()" style="padding: 10px 20px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: white; color: #333;">রিসেট করুন</button>
-                    <button id="sendSmsBtn" onclick="sendSms()" style="background: #0c105c; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">এসএমএস পাঠান</button>
+                    <button id="sendSmsBtn" onclick="sendSms()" style="background: #0c105c; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">BNET এ SMS পাঠান</button>
                 </div>
             </div>
 
@@ -22428,9 +22521,14 @@ function updateSmsRecipientOptions() {
 // শ্রেণীর সকল শিক্ষার্থীর তথ্য প্রদর্শন করুন (শিক্ষার্থী (Students)-এর তথ্য + মোবাইল নম্বরসহ)
 function showSelectedClassInfo() {
     const className = document.getElementById('smsClassSelect').value;
-    const allStudents = (typeof getSmsStudents === 'function') ? getSmsStudents() : [];
+    let allStudents = (typeof getSmsStudents === 'function') ? getSmsStudents() : [];
     const classInfoDisplay = document.getElementById('classInfoDisplay');
     const classDetailsContent = document.getElementById('classDetailsContent');
+    
+    // Ensure allStudents is an array
+    if (!Array.isArray(allStudents)) {
+        allStudents = [];
+    }
     
     if (!className) {
         classInfoDisplay.style.display = 'none';
@@ -22706,21 +22804,40 @@ async function sendSms() {
     // ফোন নম্বর সংগ্রহ করুন
     const phoneList = getPhoneNumbers(type, studentId, className);
     
-    if (phoneList.length === 0) {
-        alert('❌ কোনো বৈধ ফোন নম্বর পাওয়া যায়নি। অনুগ্রহ করে শিক্ষার্থী ডেটা পরীক্ষা করুন।');
+    // phoneList যাচাই করুন
+    if (!phoneList || !Array.isArray(phoneList) || phoneList.length === 0) {
+        alert('❌ কোনো বৈধ ফোন নম্বর পাওয়া যায়নি।\\n\\nকারণ:\\n• শিক্ষার্থী ডেটা অপূর্ণ\\n• মোবাইল নম্বর নেই অথবা ভুল ফরম্যাট\\n• Student Information > Students এ ডেটা যুক্ত করুন');
         return;
     }
 
-    // স্কুলের নিজস্ব SMS প্যানেল কনফিগ চেক করুন
-    const _cfg = (typeof getSmsPanelConfig === 'function') ? getSmsPanelConfig() : {};
-    if (!_cfg.apiKey || !_cfg.senderId) {
-        alert('❌ আগে উপরের "SMS অ্যাকাউন্ট সেটিংস"-এ আপনার স্কুলের API Key ও Sender ID সেভ করুন।\n\nঅ্যাকাউন্ট না থাকলে রেজিস্টার করুন: https://smspanel.successlifeit.com/register');
+    // BNET কনফিগ চেক করুন
+    const bnetCfg = getBnetSmsConfig();
+    if (!bnetCfg.apiKey || !bnetCfg.senderId) {
+        alert('❌ আগে উপরের "BNET SMS API সেটিংস"-এ API Key ও Sender ID সেভ করুন।\\n\\nBNET Portal: https://portal.bnet.com.bd/');
+        return;
+    }
+
+    // phoneNumbers extract করুন (array এ রূপান্তর)
+    let phoneNumbers = [];
+    try {
+        // Ensure phoneList is an array before calling map
+        if (!Array.isArray(phoneList)) {
+            console.error('ERROR: phoneList is not an array:', typeof phoneList, phoneList);
+            throw new Error('ফোন নম্বরের তালিকা একটি array নয়। Debugging: ' + typeof phoneList);
+        }
+        phoneNumbers = phoneList.map(p => p.number || p);
+        // নিশ্চিত করুন যে এটি একটি বৈধ array
+        if (!Array.isArray(phoneNumbers) || phoneNumbers.length === 0) {
+            throw new Error('ফোন নম্বর array তৈরি ব্যর্থ');
+        }
+    } catch (err) {
+        console.error('ফোন নম্বর extract করতে ত্রুটি:', err);
+        alert('❌ ফোন নম্বর প্রক্রিয়া করতে ত্রুটি: ' + err.message);
         return;
     }
 
     // কনফার্ম করুন
-    const phoneNumbers = phoneList.map(p => p.number);
-    const confirm_msg = `✓ আপনি ${phoneNumbers.length} টি নম্বরে এসএমএস পাঠাতে চলেছেন।\\n\\n${message}\\n\\nকি আপনি নিশ্চিত?`;
+    const confirm_msg = `✓ আপনি ${phoneNumbers.length} টি নম্বরে এসএমএস পাঠাতে চলেছেন।\\n\\n📝 বার্তা: ${message}\\n\\nকি আপনি নিশ্চিত?`;
     
     if (!window.confirm(confirm_msg)) {
         return;
@@ -22730,15 +22847,12 @@ async function sendSms() {
     const sendBtn = document.getElementById('sendSmsBtn');
     const originalText = sendBtn.textContent;
     sendBtn.disabled = true;
-    sendBtn.textContent = '⏳ পাঠানো হচ্ছে...';
+    sendBtn.textContent = '⏳ BNET এ পাঠানো হচ্ছে...';
 
     try {
-        // SMS পাঠান (স্কুলের নিজস্ব SuccessLife প্যানেল অ্যাকাউন্ট থেকে — ক্রেডিট ওই অ্যাকাউন্ট থেকেই কাটবে)
-        const results = await sendSmsViaSuccessPanel(phoneNumbers, message);
+        // BNET API এর মাধ্যমে SMS পাঠান
+        const results = await sendSmsThroughBnet(phoneNumbers, message);
 
-        // স্থানীয় হিসাবে সংরক্ষণ করুন (ড্যাশবোর্ড সামারির জন্য)
-        if (typeof logSmsSend === 'function') logSmsSend(results.success);
-        
         // ফলাফল দেখান
         showSmsResults(results, message);
         
@@ -22748,7 +22862,7 @@ async function sendSms() {
         }
     } catch (error) {
         console.error('SMS পাঠানোর সময় ত্রুটি:', error);
-        alert('❌ SMS পাঠানোর সময় ত্রুটি হয়েছে: ' + error.message);
+        alert('❌ SMS পাঠানোর সময় ত্রুটি হয়েছে:\\n' + error.message);
     } finally {
         sendBtn.disabled = false;
         sendBtn.textContent = originalText;
@@ -22795,7 +22909,7 @@ function showSmsResults(results, message) {
                         </tr>
                     </thead>
                     <tbody>
-                        ${results.details.map((detail, index) => `
+                        ${(Array.isArray(results.details) ? results.details : []).map((detail, index) => `
                             <tr style="background-color: ${index % 2 === 0 ? '#ffffff' : '#f9f9f9'};">
                                 <td style="padding: 8px; border: 1px solid #ddd;">${detail.phone}</td>
                                 <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">${detail.status}</td>
