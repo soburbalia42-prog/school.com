@@ -22290,7 +22290,13 @@ async function sendSmsThroughBnet(phoneNumbers, message) {
             }
             
             const encodedMsg = encodeURIComponent(message);
-            const apiUrl = `https://api.bnet.com.bd/smsapi2?api_key=${apiKey}&type=text&contacts=${formattedPhone}&senderid=${senderId}&msg=${encodedMsg}`;
+            const bnetUrl = `https://api.bnet.com.bd/smsapi2?api_key=${apiKey}&type=text&contacts=${formattedPhone}&senderid=${senderId}&msg=${encodedMsg}`;
+            // BNET-এর API ব্রাউজার থেকে সরাসরি কল করলে CORS ব্লক করে দেয় (কারণ তাদের
+            // সার্ভার কোনো Access-Control-Allow-Origin হেডার পাঠায় না)। তাই একটা পাবলিক
+            // CORS প্রক্সি (allorigins.win) দিয়ে কল করা হচ্ছে — এটা সার্ভার সাইড থেকে
+            // BNET-কে কল করে ফলাফল ফেরত দেয়, ফলে আলাদা কোনো ব্যাকএন্ড ফাইলের দরকার হয় না।
+            // নোট: এই তৃতীয় পক্ষের সার্ভিসটা মাঝে মাঝে ডাউন/স্লো থাকতে পারে।
+            const apiUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(bnetUrl)}`;
             
             const response = await fetch(apiUrl, {
                 method: 'GET'
