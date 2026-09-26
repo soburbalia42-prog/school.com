@@ -22275,58 +22275,25 @@ async function fetchBnetDirect(url, timeoutMs) {
     return { delivered: out.resolved, timeout: out.timeout || false, reason: out.reason || '' };
 }
 
-// পাবলিক CORS প্রক্সির মাধ্যমে কল (প্রক্সি সার্ভার-সাইড থেকে BNET-কে কল করে পড়া যায় এমন ফলাফল দেয়)
-async function fetchViaProxy(url, timeoutMs) {
-    const controller = new AbortController();
-    const timer = setTimeout(function() { controller.abort(); }, timeoutMs);
-    try {
-        const res = await fetch(url, { method: 'GET', signal: controller.signal });
-        const body = await res.text();
-        return { ok: res.ok, status: res.status, body: body };
-    } catch (err) {
-        return { ok: false, status: 0, reason: (err && err.message) || 'নেটওয়ার্ক ত্রুটি' };
-    } finally {
-        clearTimeout(timer);
-    }
+const BNET_API_BASE = 'https://api.bnet.com.bd/smsapi2';
+
+function buildBnetSmsUrl(contacts, message, config) {
+    const cfg = config || getBnetSmsConfig();
+    return BNET_API_BASE + '?api_key=' + encodeURIComponent(cfg.apiKey || '') +
+        '&type=text&contacts=' + encodeURIComponent(contacts) +
+        '&senderid=' + encodeURIComponent(cfg.senderId || '') +
+        '&msg=' + encodeURIComponent(message);
 }
 
-// BNET-এর JSON রেসপন্স বিশ্লেষণ: error_code 1000 = সফল, বাকিগুলো = আসল কারণসহ ব্যর্থ
-function parseBnetResponse(body) {
-    try {
-        const j = JSON.parse(body);
-        if (j && j.error_code !== undefined) {
-            if (String(j.error_code) === '1000') {
-                return { ok: true, info: j.message_id ? ('message_id: ' + j.message_id) : '', ipAuth: false };
-            }
-            const ipAuth = String(j.error_code) === '1001' || /IP Auth/i.test(j.error_message || '');
-            return { ok: false, info: bnetErrorHint(j), ipAuth: ipAuth };
-        }
-    } catch (e) { /* JSON নয় */ }
-    return { ok: null, info: '', ipAuth: false };
+// BNET ১৩ ডিজিটের 880-উপসর্গসহ নম্বর চায়; অন্য ফরম্যাট হলে null ফেরত দেয় (পাঠানো হবে না)
+function normalizeBnetNumber(num) {
+    const d = String(num == null ? '' : num).trim().replace(/\D/g, '');
+    if (d.length === 11) return '88' + d;
+    if (d.length === 13 && d.indexOf('88') === 0) return d;
+    return null;
 }
 
-function bnetErrorHint(j) {
-    const code = String(j.error_code);
-    const msg = j.error_message || '';
-    if (code === '1001' || /IP Auth/i.test(msg)) {
-        return 'IP Auth Failed (1001) — BNET Portal (portal.bnet.com.bd)-এ আপনার IP হোয়াইটলিস্ট করুন অথবা IP authentication বন্ধ করুন, নইলে কোনো SMS যাবে না';
-    }
-    return msg || ('error_code ' + code);
-}
-
-// ব্যাচ শুরুতে একবারই যাচাই: কোনো CORS প্রক্সি জীবন্ত আছে কি না (জীবন্ত থাকলে BNET-এর আসল রেসপন্স পড়া যায়)
-async function probeProxyChannel() {
-    const target = encodeURIComponent('https://api.bnet.com.bd/');
-    const probes = [
-        'https://api.allorigins.win/raw?url=' + target,
-        'https://api.codetabs.com/v1/proxy?quest=' + target
-    ];
-    for (const probeUrl of probes) {
-        const r = await fetchViaProxy(probeUrl, 10000);
-        if (r.status === 200) return true;
-    }
-    return false;
-}
+function bnetNow() { return new Date().toLocaleTimeString('bn-BD'); }
 
 async function sendSmsThroughBnet(phoneNumbers, message) {
     const config = getBnetSmsConfig();
@@ -22341,115 +22308,239 @@ async function sendSmsThroughBnet(phoneNumbers, message) {
         throw new Error('কোনো ফোন নম্বর পাওয়া যায়নি');
     }
     
-    let successCount = 0;
+    let sentCount = 0;
     let failedCount = 0;
+    let uncertainCount = 0;
     const failedPhones = [];
     const details = [];
-    
-    // ব্যাচ শুরুতে একবারই যাচাই: প্রক্সি জীবন্ত থাকলে তার মাধ্যমে পাঠানো হয় (BNET-এর আসল রেসপন্স পড়া যায়)
-    const proxyChannelOk = await probeProxyChannel();
-    
+
     for (const phone of phoneNumbers) {
-        try {
-            let formattedPhone = String(phone).trim().replace(/\D/g, '');
-            
-            // নিশ্চিত করুন যে 11 ডিজিট আছে
-            if (formattedPhone.length === 11) {
-                formattedPhone = '88' + formattedPhone;
-            } else if (formattedPhone.length === 13 && formattedPhone.startsWith('88')) {
-                // ইতিমধ্যে সঠিক ফরম্যাট
-            } else {
-                failedCount++;
-                failedPhones.push(phone);
-                details.push({ phone: phone, status: '❌ ব্যর্থ - ভুল নম্বর ফরম্যাট', time: new Date().toLocaleTimeString('bn-BD') });
-                continue;
-            }
-            
-            const encodedMsg = encodeURIComponent(message);
-            const bnetUrl = `https://api.bnet.com.bd/smsapi2?api_key=${apiKey}&type=text&contacts=${formattedPhone}&senderid=${senderId}&msg=${encodedMsg}`;
-            // প্রক্সি জীবন্ত থাকলে তার মাধ্যমে পাঠানো হয় — তাহলে BNET-এর আসল রেসপন্স (error_code)
-            // পড়া যায়, ফলে ভুল "সফল" দেখায় না। প্রক্সিগুলোতে নেটওয়ার্কই না পৌঁছালে তবেই
-            // সরাসরি no-cors ফলব্যাক (অন্ধ, কিন্তু প্রক্সি-ছাড়াও SMS যেতে পারে)।
-            const encodedBnetUrl = encodeURIComponent(bnetUrl);
-            const corsProxies = [
-                'https://api.allorigins.win/raw?url=' + encodedBnetUrl,
-                'https://corsproxy.io/?url=' + encodedBnetUrl,
-                'https://api.codetabs.com/v1/proxy?quest=' + encodedBnetUrl
-            ];
-            
-            let sent = false;
-            let sentVia = '';
-            let lastFailReason = '';
-            let uncertain = false;
-            let bnetSaidError = false;
-            let ipAuthError = false;
-            
-            if (proxyChannelOk) {
-                for (const apiUrl of corsProxies) {
-                    const proxyResult = await fetchViaProxy(apiUrl, 20000);
-                    if (proxyResult.status) {
-                        const parsed = parseBnetResponse(proxyResult.body || '');
-                        if (parsed.ok === true) {
-                            sent = true;
-                            sentVia = 'প্রক্সি';
-                        } else if (parsed.ok === false) {
-                            lastFailReason = parsed.info;
-                            bnetSaidError = true;
-                            ipAuthError = parsed.ipAuth;
-                        } else {
-                            lastFailReason = 'HTTP ' + proxyResult.status;
-                        }
-                        break;
-                    }
-                    lastFailReason = proxyResult.reason || lastFailReason;
-                }
-            }
-            
-            // IP Auth ব্যর্থ হলে কিছুই পাঠানো হয়নি — তাই তখন সরাসরি চ্যানেলে আবার চেষ্টা করা নিরাপদ
-            // (হয়তো আপনার নিজের IP হোয়াইটলিস্ট করা আছে)। অন্য পরিষ্কার ত্রুটিতে (ব্যালেন্স ইত্যাদি)
-            // আবার পাঠানোর দরকার নেই।
-            if (!sent && !uncertain && (!bnetSaidError || ipAuthError)) {
-                let attempt = await fetchBnetDirect(bnetUrl, 20000);
-                if (!attempt.delivered && !attempt.timeout) {
-                    attempt = await fetchBnetDirect(bnetUrl, 20000);
-                }
-                if (attempt.delivered) {
-                    sent = true;
-                    sentVia = 'সরাসরি BNET — রেসপন্স যাচাই হয়নি';
-                } else if (attempt.timeout) {
-                    // টাইমআউট মানে রিকোয়েস্ট সার্ভারে পৌঁছে থাকতে পারে — আবার পাঠালে ডুপ্লিকেট SMS ঝুঁকি
-                    uncertain = true;
-                    lastFailReason = 'সময় শেষ - সার্ভার সাড়া দেয়নি';
-                } else if (!bnetSaidError) {
-                    lastFailReason = attempt.reason;
-                }
-            }
-            
-            if (sent) {
-                successCount++;
-                details.push({ phone: formattedPhone, status: '✓ সফল (' + sentVia + ')', time: new Date().toLocaleTimeString('bn-BD') });
-            } else {
-                failedCount++;
-                failedPhones.push(phone);
-                details.push({ phone: formattedPhone, status: (uncertain ? '⏳ ' : '❌ ব্যর্থ - ') + lastFailReason, time: new Date().toLocaleTimeString('bn-BD') });
-            }
-        } catch (error) {
+        const formattedPhone = normalizeBnetNumber(phone);
+        if (!formattedPhone) {
             failedCount++;
             failedPhones.push(phone);
-            details.push({ phone: phone, status: '❌ ত্রুটি - ' + error.message, time: new Date().toLocaleTimeString('bn-BD') });
+            details.push({ phone: phone, status: '❌ ব্যর্থ - ভুল নম্বর ফরম্যাট', time: bnetNow() });
+            continue;
         }
-        
+
+        let attempt = await fetchBnetDirect(buildBnetSmsUrl(formattedPhone, message, config), 20000);
+        if (!attempt.delivered && !attempt.timeout) {
+            attempt = await fetchBnetDirect(buildBnetSmsUrl(formattedPhone, message, config), 20000);
+        }
+
+        if (attempt.delivered) {
+            sentCount++;
+            details.push({ phone: formattedPhone, status: '⚠ রিকোয়েস্ট BNET-এ পৌঁছেছে — নিশ্চিতকরণ পড়া যায়নি', time: bnetNow() });
+        } else if (attempt.timeout) {
+            // টাইমআউট মানে রিকোয়েস্ট সার্ভারে পৌঁছে থাকতে পারে — আবার পাঠালে ডুপ্লিকেট SMS ঝুঁকি
+            uncertainCount++;
+            failedPhones.push(phone);
+            details.push({ phone: formattedPhone, status: '⏳ অনিশ্চিত - সার্ভার সাড়া দেয়নি', time: bnetNow() });
+        } else {
+            failedCount++;
+            failedPhones.push(phone);
+            details.push({ phone: formattedPhone, status: '❌ ব্যর্থ - ' + (attempt.reason || 'নেটওয়ার্ক ত্রুটি'), time: bnetNow() });
+        }
+
         // রেট লিমিটিং এর জন্য বিলম্ব
         await new Promise(resolve => setTimeout(resolve, 300));
     }
-    
+
     return {
         total: phoneNumbers.length,
-        success: successCount,
+        success: 0,
+        sent: sentCount,
+        uncertain: uncertainCount,
         failed: failedCount,
         failedPhones: failedPhones,
         details: details
     };
+}
+
+// ========== SMS সমস্যা নির্ণয় ও টেস্ট SMS ==========
+// ফাইলে আগে থেকে বসানো ডেমো কী — এটি ব্যবহার হলে BNET কোনো SMS গ্রহণ করে না
+const BNET_BUILTIN_API_KEY = '91660f6c3b4d439289c5f80c81af4e96';
+
+function maskBnetKey(k) {
+    const s = String(k == null ? '' : k);
+    if (!s) return '(খালি)';
+    return s.length <= 8 ? '****' : s.slice(0, 4) + '…' + s.slice(-4);
+}
+
+function bnetConfigState() {
+    const cfg = getBnetSmsConfig();
+    return {
+        cfg: cfg,
+        saved: !!localStorage.getItem('bnet_sms_config'),
+        isBuiltInKey: cfg.apiKey === BNET_BUILTIN_API_KEY
+    };
+}
+
+function smsDiagRow(r) {
+    const badge = r.warn
+        ? '<span style="color:#8a4b08;font-weight:bold;">⚠</span>'
+        : (r.ok ? '<span style="color:#2e7d32;font-weight:bold;">✓</span>' : '<span style="color:#d90429;font-weight:bold;">✗</span>');
+    return '<tr>' +
+        '<td style="padding:8px;border:1px solid #ddd;text-align:center;width:34px;">' + badge + '</td>' +
+        '<td style="padding:8px;border:1px solid #ddd;font-weight:bold;">' + r.label + '</td>' +
+        '<td style="padding:8px;border:1px solid #ddd;line-height:1.8;">' + r.detail + '</td>' +
+        '</tr>';
+}
+
+// সম্ভাব্য কারণ ও করণীয় — BNET-এর রেসপন্স ব্রাউজার থেকে পড়া যায় না বলে
+// আসল কারণ শুধু BNET Portal-এ গিয়েই নিশ্চিত হওয়া যায়
+function smsCauseChecklist() {
+    return '' +
+        '<div style="margin-top:14px;padding:12px 14px;background:#fff3cd;border:1px solid #ffc107;border-radius:6px;line-height:1.9;font-size:13px;">' +
+        '<strong style="color:#8a4b08;">SMS না যাওয়ার সম্ভাব্য কারণ (BNET Portal-এ মিলিয়ে নিন):</strong>' +
+        '<ol style="margin:8px 0 0 18px;padding:0;">' +
+        '<li><strong>API Key ভুল/মেয়াদোত্তীর্ণ</strong> — Portal → API সেকশনের কী-এর সাথে মিলিয়ে দেখুন।</li>' +
+        '<li><strong>ব্যালেন্স শেষ</strong> — Portal-এ বাকি SMS ক্রেডিট দেখুন।</li>' +
+        '<li><strong>Sender ID অনুমোদিত নয়</strong> — Portal-এ যে Sender ID অনুমোদিত, ঠিক সেটাই ব্যবহার করুন।</li>' +
+        '<li><strong>IP whitelist চালু</strong> — Portal → IP Whitelist-এ উপরে দেখানো আপনার IP যুক্ত করুন, অথবা IP authentication বন্ধ করুন। ' +
+        'IP আটকালে BNET <code>1001 IP Auth Failed</code> ফেরত দেয় এবং কোনো SMS যায় না।</li>' +
+        '</ol>' +
+        '<p style="margin:10px 0 0 0;">Portal: <a href="https://portal.bnet.com.bd/" target="_blank" style="color:#0c105c;font-weight:bold;">https://portal.bnet.com.bd/</a> — পাঠানোর পর Portal-এর <strong>Delivery Report</strong> দেখলেই নিশ্চিত হবেন SMS টি গ্রহণ হয়েছে কি না।</p>' +
+        '</div>';
+}
+
+async function runSmsDiagnostics() {
+    const out = document.getElementById('smsDiagOutput');
+    const btn = document.getElementById('smsDiagBtn');
+    if (!out || !btn) return;
+
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = '⏳ পরীক্ষা চলছে...';
+    out.style.display = 'block';
+    out.innerHTML = '<div style="color:#666;padding:10px;">পরীক্ষা চলছে — কয়েক সেকেন্ড লাগতে পারে…</div>';
+
+    const rows = [];
+    const st = bnetConfigState();
+
+    rows.push({
+        ok: st.saved && !st.isBuiltInKey,
+        label: 'API Key ও Sender ID',
+        detail: 'Key: <code>' + gateEsc(maskBnetKey(st.cfg.apiKey)) + '</code> &nbsp;|&nbsp; Sender ID: <code>' + gateEsc(st.cfg.senderId || '(খালি)') + '</code>' +
+            (st.isBuiltInKey
+                ? '<br><strong style="color:#d90429;">এটি এই ফাইলে আগে থেকে বসানো ডেমো কী — আপনার নিজের BNET অ্যাকাউন্টের কী নয়, তাই কোনো SMS যাবে না।</strong> BNET Portal থেকে নিজের API Key ও অনুমোদিত Sender ID এনে উপরে সেভ করুন।'
+                : (st.saved ? '' : '<br>নিজের কী এখনো সেভ করা হয়নি — উপরে সেভ করুন।'))
+    });
+
+    // contacts=000 দিলে BNET "1091 Invalid Mobile No" ফেরত দেয় — কোনো SMS যায় না, ক্রেডিটও কাটে না
+    const probe = await fetchBnetDirect(buildBnetSmsUrl('000', 'test', st.cfg), 15000);
+    rows.push({
+        ok: probe.delivered,
+        label: 'BNET সার্ভারে সংযোগ',
+        detail: probe.delivered
+            ? 'api.bnet.com.bd-তে রিকোয়েস্ট পৌঁছেছে — ইন্টারনেট ও নেটওয়ার্ক ঠিক আছে।'
+            : (probe.timeout ? 'সার্ভার সাড়া দেয়নি (সময় শেষ) — ইন্টারনেট সংযোগ বা ফায়ারওয়াল দেখুন।' : 'সংযোগ ব্যর্থ: ' + gateEsc(probe.reason))
+    });
+
+    rows.push({
+        ok: false,
+        warn: true,
+        label: 'ফলাফল পড়া যাচ্ছে কি না',
+        detail: 'BNET সার্ভার কোনো CORS হেডার পাঠায় না, তাই ব্রাউজার থেকে তার <code>error_code</code> পড়া অসম্ভব। এই পেজ শুধু বলতে পারে রিকোয়েস্ট পৌঁছেছে কি না — BNET গ্রহণ করেছে কি না তা বলতে পারে না। নিশ্চিত হতে নিচের <strong>টেস্ট SMS</strong> পাঠান।'
+    });
+
+    let myIp = 'যাচাই করা যায়নি';
+    try {
+        const r = await fetch('https://api.ipify.org?format=json');
+        const j = await r.json();
+        if (j && j.ip) myIp = j.ip;
+    } catch (e) { /* IP সেবা পৌঁছানো যায়নি */ }
+    rows.push({
+        ok: true,
+        label: 'আপনার পাবলিক IP',
+        detail: '<code>' + gateEsc(myIp) + '</code> — IP whitelist চালু থাকলে BNET Portal-এ এই IP যুক্ত করতে হবে।'
+    });
+
+    let validCount = 0;
+    let invalidCount = 0;
+    try {
+        const all = getPhoneNumbers('all') || [];
+        all.forEach(function(p) {
+            if (normalizeBnetNumber(p.number || p)) validCount++; else invalidCount++;
+        });
+    } catch (e) { /* শিক্ষার্থী ডেটা নেই */ }
+    rows.push({
+        ok: validCount > 0 && invalidCount === 0,
+        warn: validCount > 0 && invalidCount > 0,
+        label: 'সংরক্ষিত মোবাইল নম্বর',
+        detail: 'বৈধ (১১ বা ১৩ ডিজিট): <strong>' + validCount + '</strong> টি &nbsp;|&nbsp; ভুল ফরম্যাট: <strong>' + invalidCount + '</strong> টি' +
+            (validCount === 0
+                ? '<br>একটিও বৈধ নম্বর নেই — Student Information → Students-এ মোবাইল নম্বর যুক্ত করুন।'
+                : (invalidCount > 0 ? '<br>ভুল ফরম্যাটের নম্বরগুলোতে SMS যাবে না — সংশোধন করুন।' : ''))
+    });
+
+    out.innerHTML = '<table style="width:100%;border-collapse:collapse;"><tbody>' +
+        rows.map(smsDiagRow).join('') +
+        '</tbody></table>' + smsCauseChecklist();
+
+    btn.disabled = false;
+    btn.textContent = label;
+}
+
+// এক নম্বরে একটি টেস্ট SMS — BNET অ্যাকাউন্ট আসলে কাজ করছে কি না বোঝার একমাত্র নিশ্চিত উপায়
+async function sendBnetTestSms() {
+    const input = document.getElementById('bnetTestNumber');
+    const btn = document.getElementById('bnetTestBtn');
+    const out = document.getElementById('smsTestOutput');
+    if (!input || !btn || !out) return;
+
+    const st = bnetConfigState();
+    const number = normalizeBnetNumber(input.value);
+    if (!number) {
+        alert('❌ সঠিক মোবাইল নম্বর দিন (যেমন: 01712345678)।');
+        return;
+    }
+    const keyNote = st.isBuiltInKey
+        ? '\n\n⚠ এখনো ফাইলে আগে থেকে বসানো API Key ব্যবহার হচ্ছে — এই কী কাজ না করলে SMS পৌঁছাবে না।'
+        : '';
+    if (!window.confirm('এই নম্বরে একটি টেস্ট SMS পাঠানো হবে:\n' + number + '\n\n(১টি SMS ক্রেডিট খরচ হবে)' + keyNote)) return;
+
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = '⏳ পাঠানো হচ্ছে...';
+    out.style.display = 'block';
+    out.innerHTML = '<div style="color:#666;padding:10px;">পাঠানো হচ্ছে…</div>';
+
+    const attempt = await fetchBnetDirect(buildBnetSmsUrl(number, 'টেস্ট SMS — সিরাজ কিন্ডারগার্টেন স্কুল', st.cfg), 20000);
+
+    btn.disabled = false;
+    btn.textContent = label;
+
+    if (!attempt.delivered) {
+        out.innerHTML = '<div style="padding:10px;color:#d90429;font-weight:bold;">❌ রিকোয়েস্ট BNET-এ পৌঁছায়নি' +
+            (attempt.timeout ? ' (সময় শেষ)' : ': ' + gateEsc(attempt.reason)) +
+            ' — ইন্টারনেট সংযোগ পরীক্ষা করুন।</div>';
+        return;
+    }
+
+    out.innerHTML = '<div style="padding:12px;background:#e8f5e9;border:1px solid #2e7d32;border-radius:6px;line-height:1.8;">' +
+        '⚠ রিকোয়েস্ট BNET-এ পৌঁছেছে, কিন্তু ব্রাউজার থেকে তার ফলাফল পড়া যায় না।<br>' +
+        '<strong>' + gateEsc(number) + '</strong> নম্বরে ১-২ মিনিটের মধ্যে SMS এসেছে কি?' +
+        '<div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;">' +
+        '<button onclick="showTestSmsVerdict(true)" style="padding:9px 18px;background:#2e7d32;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">হ্যাঁ, SMS পেয়েছি</button>' +
+        '<button onclick="showTestSmsVerdict(false)" style="padding:9px 18px;background:#d90429;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">না, SMS পাইনি</button>' +
+        '</div></div>';
+}
+
+function showTestSmsVerdict(received) {
+    const out = document.getElementById('smsTestOutput');
+    if (!out) return;
+    out.style.display = 'block';
+    if (received) {
+        out.innerHTML = '<div style="padding:12px;background:#e8f5e9;border:1px solid #2e7d32;border-radius:6px;line-height:1.9;">' +
+            '<strong style="color:#2e7d32;">✓ আপনার BNET অ্যাকাউন্ট ঠিক আছে — API Key, ব্যালেন্স, Sender ID ও IP সবকিছু কাজ করছে।</strong><br>' +
+            'তাহলে SMS না যাওয়ার কারণ প্রাপকের নম্বর। উপরের "SMS সমস্যা নির্ণয়" চালিয়ে দেখুন কতটি নম্বর ভুল ফরম্যাটে আছে, তারপর Student Information → Students-এ নম্বর সংশোধন করুন।</div>';
+        return;
+    }
+    out.innerHTML = '<div style="padding:12px;background:#ffebee;border:1px solid #d90429;border-radius:6px;line-height:1.9;">' +
+        '<strong style="color:#d90429;">✗ রিকোয়েস্ট পৌঁছেছে কিন্তু BNET SMS টি পাঠায়নি — সমস্যা আপনার BNET অ্যাকাউন্টে, এই ওয়েবসাইটে নয়।</strong><br>' +
+        'ব্রাউজার থেকে BNET-এর error_code পড়া যায় না, তাই আসল কারণ নিচের তালিকা মিলিয়ে Portal-এ বের করুন:</div>' +
+        smsCauseChecklist();
 }
 
 // ========== SuccessLife SMS Panel (smspanel.successlifeit.com) দিয়ে SMS পাঠানো ==========
@@ -22554,9 +22645,23 @@ async function loadSendSmsPage(event) {
                     <button onclick="saveBnetSmsConfig(document.getElementById('bnetApiKey').value, document.getElementById('bnetSenderId').value)" style="padding: 9px 18px; background: #0c105c; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">সেভ করুন</button>
                     <p style="font-size: 11px; color: #666; margin: 10px 0 0 0;">API URL: <code>https://api.bnet.com.bd/smsapi2?api_key=#API_KEY#&type=text&contacts=#contact#&senderid=#SENDERID#&msg=#smstext#</code></p>
                     <p style="font-size: 12px; color: #8a4b08; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 8px 10px; margin: 10px 0 0 0; line-height: 1.7;">
-                        ⚠ <strong>SMS যাচ্ছে না?</strong> BNET অ্যাকাউন্টে IP whitelist চালু থাকলে শুধু হোয়াইটলিস্ট করা IP থেকেই SMS যায় — অন্য সব রিকোয়েস্ট নীরবে বাতিল হয় (error 1001 IP Auth Failed)। BNET Portal-এ IP whitelist-এ আপনার IP যুক্ত করুন অথবা IP authentication বন্ধ করুন।
-                        <br>আপনার বর্তমান পাবলিক IP: <strong id="bnetMyIp" style="color: #0c105c;">খোঁজা হচ্ছে...</strong>
+                        ⚠ <strong>SMS যাচ্ছে না?</strong> BNET সার্ভার কোনো CORS হেডার পাঠায় না, তাই এই পেজ থেকে বলা সম্ভব না একটি SMS কেন বাতিল হলো — শুধু রিকোয়েস্ট পৌঁছানো পর্যন্ত দেখা যায়। আসল কারণ বের করতে নিচের <strong>"SMS সমস্যা নির্ণয়"</strong> চালান, তারপর একটি <strong>টেস্ট SMS</strong> পাঠিয়ে নিশ্চিত হোন।
+                        <br>আপনার বর্তমান পাবলিক IP: <strong id="bnetMyIp" style="color: #0c105c;">খোঁজা হচ্ছে...</strong> — BNET অ্যাকাউন্টে IP whitelist চালু থাকলে Portal-এ এই IP যুক্ত করতে হবে, নইলে রিকোয়েস্ট নীরবে বাতিল হয় (error 1001 IP Auth Failed)।
                     </p>
+
+                    <div style="margin-top: 12px;">
+                        <button id="smsDiagBtn" onclick="runSmsDiagnostics()" style="padding: 9px 18px; background: #1565c0; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">🔎 SMS সমস্যা নির্ণয় করুন</button>
+                    </div>
+                    <div id="smsDiagOutput" style="display: none; margin-top: 12px; overflow-x: auto;"></div>
+
+                    <div style="margin-top: 14px; padding: 12px; background: #f5f5f5; border: 1px dashed #999; border-radius: 6px;">
+                        <label style="display: block; margin-bottom: 6px; font-weight: bold; font-size: 13px;">📱 টেস্ট SMS — নিজের নম্বরে ১টি পাঠিয়ে নিশ্চিত হোন (১টি ক্রেডিট খরচ হবে)</label>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <input type="text" id="bnetTestNumber" placeholder="যেমন: 01712345678" style="flex: 1; min-width: 200px; padding: 9px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                            <button id="bnetTestBtn" onclick="sendBnetTestSms()" style="padding: 9px 18px; background: #2e7d32; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">টেস্ট SMS পাঠান</button>
+                        </div>
+                        <div id="smsTestOutput" style="display: none; margin-top: 10px;"></div>
+                    </div>
                 </div>
 
                 <div style="margin-bottom: 15px;">
@@ -22963,6 +23068,10 @@ async function sendSms() {
         alert('❌ আগে উপরের "BNET SMS API সেটিংস"-এ API Key ও Sender ID সেভ করুন।\\n\\nBNET Portal: https://portal.bnet.com.bd/');
         return;
     }
+    if (bnetConfigState().isBuiltInKey) {
+        const go = window.confirm('⚠ এখনো এই ফাইলে আগে থেকে বসানো API Key ব্যবহার হচ্ছে। এটি আপনার নিজের BNET অ্যাকাউন্টের কী না হলে কোনো SMS যাবে না।\n\nনিজের কী হলে "ঠিক আছে" চাপুন, নইলে "বাতিল" চেপে BNET Portal (https://portal.bnet.com.bd/) থেকে নিজের API Key ও অনুমোদিত Sender ID সেভ করুন।');
+        if (!go) return;
+    }
 
     // phoneNumbers extract করুন (array এ রূপান্তর)
     let phoneNumbers = [];
@@ -23004,7 +23113,7 @@ async function sendSms() {
         showSmsResults(results, message);
         
         // ফর্ম রিসেট করুন
-        if (results.success > 0) {
+        if (results.sent > 0) {
             setTimeout(() => resetSmsForm(), 2000);
         }
     } catch (error) {
@@ -23023,25 +23132,33 @@ function showSmsResults(results, message) {
     
     let html = `
         <div style="margin-bottom: 15px;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px;">
-                <div style="background: #c8e6c9; padding: 15px; border-radius: 4px; text-align: center;">
-                    <div style="font-size: 24px; font-weight: bold; color: #2e7d32;">✓ ${results.success}</div>
-                    <div style="color: #2e7d32; font-weight: bold;">সফল</div>
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;">
+                <div style="background: #fff3cd; padding: 15px; border-radius: 4px; text-align: center;">
+                    <div style="font-size: 24px; font-weight: bold; color: #8a4b08;">⚠ ${results.sent || 0}</div>
+                    <div style="color: #8a4b08; font-weight: bold;">পাঠানো হয়েছে (যাচাই হয়নি)</div>
+                </div>
+                <div style="background: #e1f5fe; padding: 15px; border-radius: 4px; text-align: center;">
+                    <div style="font-size: 24px; font-weight: bold; color: #0277bd;">⏳ ${results.uncertain || 0}</div>
+                    <div style="color: #0277bd; font-weight: bold;">অনিশ্চিত</div>
                 </div>
                 <div style="background: #ffccbc; padding: 15px; border-radius: 4px; text-align: center;">
-                    <div style="font-size: 24px; font-weight: bold; color: #d84315;">✗ ${results.failed}</div>
+                    <div style="font-size: 24px; font-weight: bold; color: #d84315;">✗ ${results.failed || 0}</div>
                     <div style="color: #d84315; font-weight: bold;">ব্যর্থ</div>
                 </div>
                 <div style="background: #bbdefb; padding: 15px; border-radius: 4px; text-align: center;">
-                    <div style="font-size: 24px; font-weight: bold; color: #1565c0;">📊 ${results.total}</div>
+                    <div style="font-size: 24px; font-weight: bold; color: #1565c0;">📊 ${results.total || 0}</div>
                     <div style="color: #1565c0; font-weight: bold;">মোট</div>
                 </div>
             </div>
         </div>
+        ${(results.sent > 0) ? `
+        <div style="margin-bottom: 15px; padding: 12px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px; line-height: 1.8; font-size: 13px;">
+            ⚠ <strong>${results.sent} টি রিকোয়েস্ট BNET-এ পৌঁছেছে, কিন্তু BNET সেগুলো গ্রহণ করেছে কি না এই পেজ থেকে যাচাই করা যায় না</strong> (BNET কোনো CORS হেডার পাঠায় না)। নিশ্চিত হতে <a href="https://portal.bnet.com.bd/" target="_blank" style="color: #0c105c; font-weight: bold;">BNET Portal</a>-এর <strong>Delivery Report</strong> দেখুন। SMS না পৌঁছালে উপরের <strong>"SMS সমস্যা নির্ণয়"</strong> ও <strong>"টেস্ট SMS"</strong> ব্যবহার করুন।
+        </div>` : ''}
         <div style="margin-bottom: 15px;">
             <strong>বার্তা:</strong> <br>
             <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; margin-top: 5px; word-wrap: break-word;">
-                ${message}
+                ${gateEsc(message)}
             </div>
         </div>
         <div style="margin-bottom: 15px;">
@@ -23058,9 +23175,9 @@ function showSmsResults(results, message) {
                     <tbody>
                         ${(Array.isArray(results.details) ? results.details : []).map((detail, index) => `
                             <tr style="background-color: ${index % 2 === 0 ? '#ffffff' : '#f9f9f9'};">
-                                <td style="padding: 8px; border: 1px solid #ddd;">${detail.phone}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">${detail.status}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd;">${detail.time}</td>
+                                <td style="padding: 8px; border: 1px solid #ddd;">${gateEsc(detail.phone)}</td>
+                                <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">${gateEsc(detail.status)}</td>
+                                <td style="padding: 8px; border: 1px solid #ddd;">${gateEsc(detail.time)}</td>
                             </tr>
                         `).join('')}
                     </tbody>
@@ -23069,11 +23186,11 @@ function showSmsResults(results, message) {
         </div>
     `;
     
-    if (results.success > 0) {
-        resultTitle.textContent = '✓ SMS সফলভাবে পাঠানো হয়েছে';
-        resultTitle.style.color = '#2e7d32';
+    if (results.sent > 0) {
+        resultTitle.textContent = '⚠ SMS পাঠানো হয়েছে — Delivery Report-এ যাচাই করুন';
+        resultTitle.style.color = '#8a4b08';
     } else {
-        resultTitle.textContent = '❌ SMS পাঠানোর সময় কিছু সমস্যা হয়েছে';
+        resultTitle.textContent = '❌ কোনো SMS পাঠানো যায়নি';
         resultTitle.style.color = '#d84315';
     }
     
